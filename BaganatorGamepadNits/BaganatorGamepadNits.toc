@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Baganator Gamepad Nits
+## Notes: Small fixes layered on top of BaganatorGamepad for World of Warcraft: Forever's controller UI.
+## Author: Brian M. Carr
+## Version: 0.1.0
+## Dependencies: Baganator, BaganatorGamepad
+
+BaganatorGamepadNits.lua
