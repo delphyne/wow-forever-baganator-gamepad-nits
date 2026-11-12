@@ -38,7 +38,9 @@ BaganatorGamepad keeps everything local. What this addon can see of it:
   binds one of those names, and track whether it believes it is active (last call was a bind, not a
   `ClearOverrideBindings` of that owner).
 - Its **selection border** is an anonymous `BackdropTemplate` frame on `UIParent`, strata `TOOLTIP`, border colour
-  (1, 0.82, 0); found once with `EnumerateFrames` (at most three attempts). The item button it is anchored to is the
+  (1, 0.82, 0); found once with `EnumerateFrames` (at most three attempts; every `EnumerateFrames` loop must check
+  `frame:IsForbidden()` first, since any other method call on a forbidden frame raises the "blocked from an action
+  only available to the Blizzard UI" popup). The item button it is anchored to is the
   selected slot; fallback is `GameTooltip:GetOwner()` (it calls the button's OnEnter on selection).
 - It **re-asserts its keys** whenever another owner binds one of them (`SetOverrideBinding`/`SetOverrideBindingClick`
   hooks, next frame). Binding one of our commands with our own owner would therefore loop forever. **All our bindings
@@ -60,6 +62,16 @@ BaganatorGamepad keeps everything local. What this addon can see of it:
   attempts, at load and `PLAYER_ENTERING_WORLD`), nil its three scripts, `EnableGamePadButton(false)` /
   `EnableGamePadStick(false)`, and clear the clicker's bindings in a `SetOverrideBindingClick` hook. Its
   `FrameGlowTemplate` focus glow on the bag is left alone. `/bgnits` reports `Baganator trap disarmed`.
+- **Baganator's native controller navigation** (850+, replaces the trap; `ItemViewCommon/Gamepad.lua`
+  `AnnounceShow` and `BankView.lua` `OnShow`): each bag/bank show defers
+  `GamepadMode.FrameControlsManager:FrameShown(view)` with `C_Timer.After(0, ...)`, which would make the window a
+  focused managed panel (`isUIFocused` true, so BaganatorGamepad stays suppressed) and write manager state from
+  addon code. No setting, private functions. We `hooksecurefunc(C_Timer, "After")`, and for zero-delay callbacks
+  whose `debugstack` names one of those two files, `setfenv` the callback to an environment whose
+  `GamepadMode.FrameControlsManager` is a stub (everything else falls through to `_G`). `/bgnits` reports
+  `Baganator native nav blocked <n>` (counts up once per bag open). Its `SmartNavigation_Add*JumpNavigationOverride`
+  / `SetTargetButtonForFrame` calls are not intercepted. If Baganator moves the call, drops the timer, or adds a
+  setting, revisit: `grep -rn "FrameControlsManager\|IsGamepadInUse" Baganator`.
 - **Stock Y menu** (`Blizzard_UIPanels_Game/Mainline/ContainerFrame.lua`, `SetupGamepad`, `itemMoreActions`): a
   `GamepadSharedUtility.CreateMoreActionsPromptedBinding(GAMEPAD_FACE_TOP)` whose entries are Feed to Pet
   (hunters, `C_PetInfo.CanPetEatItem`, `PickupContainerItem` + `C_Item.DropItemOnUnit("pet")`), Bind to Gamepad

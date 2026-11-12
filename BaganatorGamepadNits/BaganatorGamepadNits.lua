@@ -103,7 +103,9 @@ local function findHighlight()
 	if not EnumerateFrames then return end
 	local frame = EnumerateFrames()
 	while frame do
-		if frame:GetObjectType() == "Frame" and not frame:GetName() and frame:GetParent() == UIParent
+		-- Forbidden frames (Blizzard's own, nameplates) are enumerated too; any other method call on one raises
+		-- "blocked from an action only available to the Blizzard UI".
+		if not frame:IsForbidden() and frame:GetObjectType() == "Frame" and not frame:GetName() and frame:GetParent() == UIParent
 			and frame:GetFrameStrata() == "TOOLTIP" and frame.GetBackdropBorderColor then
 			local r, g, b = frame:GetBackdropBorderColor()
 			if r and math.abs(r - 1) < 0.01 and math.abs(g - 0.82) < 0.01 and b < 0.01 then
@@ -214,7 +216,7 @@ local function findTrapFrame()
 	if not EnumerateFrames then return end
 	local frame = EnumerateFrames()
 	while frame do
-		if frame:GetObjectType() == "Frame" and not frame:GetName() and frame:GetParent() == UIParent
+		if not frame:IsForbidden() and frame:GetObjectType() == "Frame" and not frame:GetName() and frame:GetParent() == UIParent
 			and frame:GetScript("OnGamePadButtonUp") and frame.IsGamePadStickEnabled and frame:IsGamePadStickEnabled() then
 			return frame
 		end
@@ -242,6 +244,31 @@ hooksecurefunc("SetOverrideBindingClick", function(owner)
 end)
 
 disarmTrap()
+
+-----------------------------------------------------------------------------------------------------------------
+-- Baganator's native controller navigation (Baganator 850+, ItemViewCommon/Gamepad.lua and BankView.lua). Each
+-- time a bag or bank window shows, Baganator defers GamepadMode.FrameControlsManager:FrameShown(view) by a frame
+-- with C_Timer.After(0, ...). That makes the window a managed, focused Blizzard panel: isUIFocused goes true (so
+-- we would hold BaganatorGamepad back for good) and the manager's state is written from addon code. There is no
+-- setting for it and the functions are private, but the deferred closure passes through C_Timer.After, where a
+-- secure hook can see it: closures created in those two files get an environment in which GamepadMode's
+-- FrameControlsManager is a stub, so the registration never reaches Blizzard's manager. Nothing of Blizzard's or
+-- Baganator's is replaced; every other global still resolves through _G.
+
+local nativeNavBlocked = 0
+if C_Timer and C_Timer.After and setfenv and debugstack then
+	local stubManager = { FrameShown = function() nativeNavBlocked = nativeNavBlocked + 1 end }
+	local stubEnv = setmetatable({
+		GamepadMode = setmetatable({ FrameControlsManager = stubManager }, { __index = function(_, k) return GamepadMode and GamepadMode[k] end }),
+	}, { __index = _G, __newindex = _G })
+	hooksecurefunc(C_Timer, "After", function(seconds, callback)
+		if seconds ~= 0 or type(callback) ~= "function" then return end
+		local stack = debugstack(2, 6, 0)
+		if stack and (stack:find("Baganator[/\\]ItemViewCommon[/\\]Gamepad%.lua") or stack:find("Baganator[/\\]ItemViewCommon[/\\]BankView%.lua")) then
+			pcall(setfenv, callback, stubEnv)
+		end
+	end)
+end
 
 -----------------------------------------------------------------------------------------------------------------
 -- Jump hints. The RT hint on the Baganator window is our own frame from Blizzard's template. The LT hint on the
@@ -874,6 +901,19 @@ SlashCmdList.BAGANATORGAMEPADNITS = function()
 		.. ", legend " .. tostring(legend ~= nil) .. ", UI focused " .. tostring(m and m.isUIFocused)
 		.. ", panels " .. tostring(m and m.shownFrames and #m.shownFrames)
 		.. ", Baganator trap " .. (_G[TRAP_CLICKER] and (trapFrame and "disarmed" or "NOT FOUND") or "absent")
+		.. ", Baganator native nav blocked " .. nativeNavBlocked
 		.. ", moreBound " .. tostring(moreBound) .. ", menu " .. tostring(menuOpen and menuMode or false))
+	local names = {}
+	for i, frame in ipairs(m and m.shownFrames or {}) do
+		names[i] = tostring(frame.GetName and frame:GetName() or frame) .. (frame.IsVisible and frame:IsVisible() and "" or " (not visible)")
+	end
+	local focused = m and m.focusedFrame
+	local button = selectedButton()
+	print("  panels: " .. (#names > 0 and table.concat(names, ", ") or "none")
+		.. "; focused " .. tostring(focused and (focused.GetName and focused:GetName() or focused))
+		.. "; popup " .. tostring(popupShown()) .. ", merchant " .. tostring(MerchantFrame and MerchantFrame:IsShown() or false)
+		.. ", cursor item " .. tostring(CursorHasItem())
+		.. ", selected slot " .. (button and (button:GetBagID() .. "/" .. button:GetID()) or "none")
+		.. ", Y -> " .. tostring(GetBindingByKey(KEYS.more)))
 	print("  LT -> " .. tostring(GetBindingByKey(KEYS.lt)) .. ", RT -> " .. tostring(GetBindingByKey(KEYS.rt)))
 end
