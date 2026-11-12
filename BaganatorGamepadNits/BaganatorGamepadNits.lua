@@ -1,4 +1,4 @@
--- BaganatorGamepadNits: two fixes layered on top of BaganatorGamepad for World of Warcraft: Forever's native
+-- BaganatorGamepadNits: fixes layered on top of BaganatorGamepad for World of Warcraft: Forever's native
 -- controller UI. Neither Baganator nor BaganatorGamepad is edited; CLAUDE.md explains how this attaches to them.
 --
 -- 1. Paging between a Baganator window and a Blizzard panel (the merchant, mainly), like the stock bag does.
@@ -9,6 +9,11 @@
 --    override binding, so the client executes it untainted; this addon never calls into FrameControlsManager.
 -- 2. A button legend under the navigated Baganator window, built from Blizzard's own input legend widgets, so it
 --    matches the footer under the stock bag: A select, X sell/equip/use, B close/back.
+-- 3. Baganator 847 grew its own controller capture that swallows every button while a bag is open, so nothing
+--    reaches BaganatorGamepad; it is disarmed here (see "Baganator's own controller capture" below).
+-- 4. The stock bag's Y "more actions" menu for the selected item (Destroy, Split Stack, Share in Chat, Feed to
+--    Pet), as our own frame and bindings (see "More actions" below), and BaganatorGamepad's keys held back while
+--    a Blizzard popup (the destroy confirmation, say) is up so the popup gets A/B.
 
 local VIEW_PATTERNS = { "BackpackViewFrame", "BankViewFrame" }
 local KEYS = {
@@ -17,6 +22,11 @@ local KEYS = {
 	pickup = GAMEPAD_FACE_BOTTOM or "PAD1",
 	back = GAMEPAD_FACE_RIGHT or "PAD2",
 	use = GAMEPAD_FACE_LEFT or "PAD3",
+	more = GAMEPAD_FACE_TOP or "PAD4",
+	up = GAMEPAD_DPAD_TOP or "PADDUP",
+	down = GAMEPAD_DPAD_BOTTOM or "PADDDOWN",
+	left = GAMEPAD_DPAD_LEFT or "PADDLEFT",
+	right = GAMEPAD_DPAD_RIGHT or "PADDRIGHT",
 }
 local TOGGLE_UI_FOCUS = "TOGGLEUIFOCUS"
 local PREVIOUS_WINDOW_BUTTON = "BaganatorGamepadPreviousWindow" -- BaganatorGamepad's own LT target
@@ -30,6 +40,7 @@ local bgHighlightSearched = 0
 local suppressed = false -- a Blizzard panel has focus; BaganatorGamepad's keys are held back
 local wantLeft = false -- LT should run TOGGLEUIFOCUS instead of BaganatorGamepad's window switch
 local rightBound = false -- RT currently runs TOGGLEUIFOCUS (set on bgOwner)
+local moreBound = false -- Y currently opens our more-actions menu (set on bgOwner)
 local hintedFrame -- Blizzard panel currently showing our LT hint
 local clearingOurselves = false
 local rebindingOurselves = false
@@ -174,6 +185,7 @@ local function releaseBaganatorGamepad()
 	ClearOverrideBindings(bgOwner)
 	clearingOurselves = false
 	rightBound = false
+	moreBound = false
 	if lastFocusedPanel() then setRight(true) end
 end
 
@@ -183,6 +195,53 @@ local function pokeBaganatorGamepad()
 	SetOverrideBindingClick(ownOwner, true, KEYS.rt, noopButton:GetName())
 	ClearOverrideBindings(ownOwner)
 end
+
+-----------------------------------------------------------------------------------------------------------------
+-- Baganator's own controller capture (Baganator 847+, ItemViewCommon/GamepadTrap.lua). While a bag is open it
+-- shows an anonymous frame on UIParent with OnGamePadButtonDown/Up and OnGamePadStick handlers. The frame only
+-- propagates the Menu button and the right stick, so every other button (d-pad, A/B/X/Y, left stick) is eaten
+-- before any binding, BaganatorGamepad's included, and two leftover debug prints spam chat ("gpb <button>" on
+-- each release, the stick name on each right-stick tick). It also override-binds X to BaganatorGamepadClicker,
+-- which clicks the first bag slot. Both are disarmed: the frame's scripts are removed and its gamepad input
+-- switched off, and the clicker's binding is cleared whenever Baganator sets it. Its focus glow on the bag is
+-- left alone. The frame is found once by EnumerateFrames, keyed on the named clicker existing.
+
+local TRAP_CLICKER = "BaganatorGamepadClicker"
+local trapFrame
+local trapSearches = 0
+
+local function findTrapFrame()
+	if not EnumerateFrames then return end
+	local frame = EnumerateFrames()
+	while frame do
+		if frame:GetObjectType() == "Frame" and not frame:GetName() and frame:GetParent() == UIParent
+			and frame:GetScript("OnGamePadButtonUp") and frame.IsGamePadStickEnabled and frame:IsGamePadStickEnabled() then
+			return frame
+		end
+		frame = EnumerateFrames(frame)
+	end
+end
+
+local function disarmTrap()
+	local clicker = _G[TRAP_CLICKER]
+	if trapFrame or not clicker or trapSearches >= 3 then return end
+	trapSearches = trapSearches + 1
+	trapFrame = findTrapFrame()
+	if not trapFrame then return end
+	for _, script in ipairs({ "OnGamePadButtonDown", "OnGamePadButtonUp", "OnGamePadStick" }) do
+		trapFrame:SetScript(script, nil)
+	end
+	if trapFrame.EnableGamePadButton then trapFrame:EnableGamePadButton(false) end
+	if trapFrame.EnableGamePadStick then trapFrame:EnableGamePadStick(false) end
+	if not InCombatLockdown() then ClearOverrideBindings(clicker) end
+end
+
+-- Baganator re-binds X to the clicker every time a bag opens (and after combat); drop it again each time.
+hooksecurefunc("SetOverrideBindingClick", function(owner)
+	if owner ~= nil and owner == _G[TRAP_CLICKER] and not InCombatLockdown() then ClearOverrideBindings(owner) end
+end)
+
+disarmTrap()
 
 -----------------------------------------------------------------------------------------------------------------
 -- Jump hints. The RT hint on the Baganator window is our own frame from Blizzard's template. The LT hint on the
@@ -270,6 +329,9 @@ local prompts = {
 		if context.merchant then return true end
 		return context.equippable or context.usable
 	end),
+	newPrompt(KEYS.more, label("CONTEXT_ACTION_LABEL_MORE_ACTIONS", "More Actions"), function()
+		return context.itemID ~= nil and not context.cursor and not context.merchant
+	end),
 	newPrompt(KEYS.back, function() return context.cursor and back() or close() end, function() return true end),
 }
 
@@ -311,6 +373,332 @@ local function refreshLegend(view)
 end
 
 -----------------------------------------------------------------------------------------------------------------
+-- More actions (Y). The stock bag's Y opens a context menu for the selected item: Feed to Pet (hunters), Bind to
+-- Gamepad Action Bar, Destroy, Share in Chat, Split Stack (Blizzard_UIPanels_Game/Mainline/ContainerFrame.lua,
+-- SetupGamepad, itemMoreActions). Blizzard builds it with MenuUtil.CreateContextMenu and the gamepad manager then
+-- focuses it; opening a Blizzard menu from addon code would taint that path (taint rule in CLAUDE.md), so this is
+-- our own frame, navigated with our own bindings on BaganatorGamepad's owner like LT/RT. Entries:
+--   Destroy: PickupContainerItem + DeleteCursorItem inside the key's hardware event; the client raises
+--     DELETE_ITEM_CONFIRM and Blizzard shows its confirmation popup (C_Item.ConfirmDeleteItem, which the stock
+--     bag uses, carries the same restriction flag and is untested from addon code).
+--   Split Stack: our own stepper (d-pad left/right 1, up/down 10; A puts the split on the cursor, B cancels), then
+--     A on an empty slot places it through BaganatorGamepad. Blizzard's StackSplitFrame is a gamepad-managed frame.
+--   Share in Chat: inserts the link into the open chat edit box; only offered while one is open (opening chat from
+--     addon code is another managed-frame path).
+--   Feed to Pet: hunters, for items the pet can eat.
+--   Bind to Gamepad Action Bar is not offered: it opens GamepadActionBarEditFrame, a managed frame.
+-- Like the stock bag, the menu is unavailable while an item is held or a merchant is open. Everything here only
+-- reads Baganator's item buttons (GetBagID/GetID) and the container API.
+
+local MORE_BUTTON = "BaganatorGamepadNits_More"
+local FEED_PET_SPELL_ID = 6991
+local SPLIT_BIG_STEP = 10
+local MENU_ROW_HEIGHT, MENU_PAD = 22, 8
+
+local menuOpen = false
+local menuMode -- "list" or "split"
+local menuEntries = {}
+local menuIndex = 1
+local menuButton -- the Baganator item button the menu was opened on
+local splitCount, splitMax = 1, 1
+
+local function bagSlot(button) return button:GetBagID(), button:GetID() end
+
+local function containerInfo(button)
+	return C_Container.GetContainerItemInfo(bagSlot(button))
+end
+
+local function activeChatEditBox()
+	if ChatFrameUtil and ChatFrameUtil.GetActiveWindow then return ChatFrameUtil.GetActiveWindow() end
+	if ChatEdit_GetActiveWindow then return ChatEdit_GetActiveWindow() end
+end
+
+local function playerIsHunter()
+	local class = UnitClassBase and UnitClassBase("player") or select(2, UnitClass("player"))
+	return class == "HUNTER"
+end
+
+-- The stock menu's entries, in its order, minus "Bind to Gamepad Action Bar".
+local menuActions = {
+	{
+		label = label("CONTEXT_ACTION_LABEL_FEED_TO_PET", "Feed to Pet"),
+		condition = function(button)
+			if not playerIsHunter() or not (C_PetInfo and C_PetInfo.CanPetEatItem) then return false end
+			if C_Spell and C_Spell.IsSpellUsable and not C_Spell.IsSpellUsable(FEED_PET_SPELL_ID) then return false end
+			local itemID = C_Container.GetContainerItemID(bagSlot(button))
+			return itemID ~= nil and C_PetInfo.CanPetEatItem(itemID) == true
+		end,
+		func = function(button)
+			ClearCursor()
+			C_Container.PickupContainerItem(bagSlot(button))
+			if CursorHasItem() then
+				C_Item.DropItemOnUnit("pet")
+				ClearCursor()
+			end
+		end,
+	},
+	{
+		label = label("CONTEXT_ACTION_LABEL_DESTROY_ITEM", "Destroy"),
+		red = true,
+		condition = function(button)
+			local info = containerInfo(button)
+			return info ~= nil and not info.isLocked
+		end,
+		func = function(button)
+			ClearCursor()
+			C_Container.PickupContainerItem(bagSlot(button))
+			if CursorHasItem() then DeleteCursorItem() end
+		end,
+	},
+	{
+		label = label("SHARE_IN_CHAT", "Share in Chat"),
+		condition = function(button)
+			return activeChatEditBox() ~= nil and C_Container.GetContainerItemLink(bagSlot(button)) ~= nil
+		end,
+		func = function(button)
+			local link = C_Container.GetContainerItemLink(bagSlot(button))
+			if not link then return end
+			if ChatFrameUtil and ChatFrameUtil.InsertLink then
+				ChatFrameUtil.InsertLink(link)
+			elseif ChatEdit_InsertLink then
+				ChatEdit_InsertLink(link)
+			end
+		end,
+	},
+	{
+		label = label("CONTEXT_ACTION_LABEL_SPLIT_ITEM_STACK", "Split Stack"),
+		condition = function(button)
+			local info = containerInfo(button)
+			return info ~= nil and not info.isLocked and (info.stackCount or 0) > 1
+		end,
+		split = true,
+	},
+}
+
+local menu = CreateFrame("Frame", "BaganatorGamepadNits_Menu", UIParent, BackdropTemplateMixin and "BackdropTemplate")
+menu:SetFrameStrata("TOOLTIP")
+menu:SetFrameLevel(600)
+menu:SetClampedToScreen(true)
+if menu.SetBackdrop then
+	menu:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+	menu:SetBackdropColor(0.05, 0.05, 0.05, 0.95)
+	menu:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+end
+menu.rows = {}
+menu.selection = menu:CreateTexture(nil, "ARTWORK")
+menu.selection:SetColorTexture(1, 0.82, 0, 0.25)
+menu.selection:Hide()
+menu:Hide()
+
+local function menuRow(i)
+	local row = menu.rows[i]
+	if not row then
+		row = menu:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		row:SetPoint("TOPLEFT", menu, "TOPLEFT", MENU_PAD + 4, -(MENU_PAD + (i - 1) * MENU_ROW_HEIGHT))
+		row:SetHeight(MENU_ROW_HEIGHT)
+		row:SetJustifyH("LEFT")
+		row:SetJustifyV("MIDDLE")
+		menu.rows[i] = row
+	end
+	return row
+end
+
+local function layoutMenu()
+	local lines = {}
+	if menuMode == "split" then
+		lines[1] = { text = menuActions[#menuActions].label(), color = NORMAL_FONT_COLOR }
+		lines[2] = { text = ("<  %d / %d  >"):format(splitCount, splitMax), color = HIGHLIGHT_FONT_COLOR }
+	else
+		for i, entry in ipairs(menuEntries) do
+			lines[i] = { text = entry.label(), color = entry.red and RED_FONT_COLOR or HIGHLIGHT_FONT_COLOR }
+		end
+	end
+	local width = 0
+	for i, line in ipairs(lines) do
+		local row = menuRow(i)
+		row:SetText(line.text)
+		row:SetTextColor(line.color:GetRGB())
+		row:Show()
+		width = math.max(width, row:GetStringWidth())
+	end
+	for i = #lines + 1, #menu.rows do menu.rows[i]:Hide() end
+	menu:SetSize(width + 2 * (MENU_PAD + 4), #lines * MENU_ROW_HEIGHT + 2 * MENU_PAD)
+	if menuMode == "list" and menuEntries[menuIndex] then
+		menu.selection:ClearAllPoints()
+		menu.selection:SetPoint("TOPLEFT", menu, "TOPLEFT", MENU_PAD / 2, -(MENU_PAD + (menuIndex - 1) * MENU_ROW_HEIGHT))
+		menu.selection:SetPoint("RIGHT", menu, "RIGHT", -MENU_PAD / 2, 0)
+		menu.selection:SetHeight(MENU_ROW_HEIGHT)
+		menu.selection:Show()
+	else
+		menu.selection:Hide()
+	end
+end
+
+-- Legend under the menu, same widgets as the bag legend: A select / B back, plus the d-pad amount in split mode.
+local menuLegendHost = CreateFrame("Frame", "BaganatorGamepadNits_MenuLegend", UIParent)
+menuLegendHost:SetSize(1, 1)
+menuLegendHost:SetPoint("CENTER")
+menuLegendHost:SetFrameStrata("TOOLTIP")
+local menuLegend
+local menuPrompts = {
+	amount = GAMEPAD_DPAD_HORIZONTAL and newPrompt(GAMEPAD_DPAD_HORIZONTAL, label("FRAME_ACTION_AMOUNT", "Amount"), function() return true end) or nil,
+	select = newPrompt(KEYS.pickup, function() return menuMode == "split" and (OKAY or "Okay") or pick() end, function() return true end),
+	back = newPrompt(KEYS.back, function() return menuMode == "split" and (CANCEL or "Cancel") or back() end, function() return true end),
+}
+
+local function ensureMenuLegend()
+	if menuLegend or not InputPromptLegends or not InputPromptLegends.CreateInputLegend then return menuLegend end
+	local ok, result = pcall(InputPromptLegends.CreateInputLegend, menuLegendHost, "menuLegend")
+	if not ok or not result then return end
+	menuLegend = result
+	for _, name in ipairs({ "amount", "select", "back" }) do
+		local prompt = menuPrompts[name]
+		if prompt then
+			pcall(menuLegend.GetOrCreatePromptFrameUsingTemplateAndInputs, menuLegend, "StandardOneIcon", { prompt.key }, GAMEPAD_PROMPT_DIVIDER_SLASH)
+		end
+	end
+	menuLegend:Hide()
+	return menuLegend
+end
+
+local function refreshMenuLegend()
+	if not ensureMenuLegend() then return end
+	if not menuOpen then return menuLegend:Hide() end
+	local list = {}
+	if menuMode == "split" and menuPrompts.amount then table.insert(list, menuPrompts.amount) end
+	table.insert(list, menuPrompts.select)
+	table.insert(list, menuPrompts.back)
+	if pcall(menuLegend.RefreshWithPromptedBindings, menuLegend, list) then
+		menuLegend:ClearAllPoints()
+		menuLegend:SetPoint("TOPLEFT", menu, "BOTTOMLEFT", 0, -4)
+		menuLegend:Show()
+	end
+end
+
+-- While the menu is open the d-pad, A, B, X and Y are ours; LT/RT stay BaganatorGamepad's (a window switch closes
+-- the menu). Set on bgOwner, so BaganatorGamepad ignores them; its next re-apply is undone by our hook below.
+local function applyMenuBindings()
+	if not canBind() or not menuOpen then return end
+	local targets = {
+		[KEYS.up] = "BaganatorGamepadNits_MenuUp",
+		[KEYS.down] = "BaganatorGamepadNits_MenuDown",
+		[KEYS.left] = "BaganatorGamepadNits_MenuLeft",
+		[KEYS.right] = "BaganatorGamepadNits_MenuRight",
+		[KEYS.pickup] = "BaganatorGamepadNits_MenuSelect",
+		[KEYS.back] = "BaganatorGamepadNits_MenuBack",
+		[KEYS.more] = "BaganatorGamepadNits_MenuBack",
+		[KEYS.use] = noopButton:GetName(),
+	}
+	for key, name in pairs(targets) do SetOverrideBindingClick(bgOwner, true, key, name) end
+end
+
+local function setMore(on)
+	if not canBind() then return end
+	if on then
+		SetOverrideBindingClick(bgOwner, true, KEYS.more, MORE_BUTTON)
+	else
+		SetOverrideBinding(bgOwner, true, KEYS.more, nil)
+	end
+	moreBound = on
+end
+
+local function closeMenu()
+	if not menuOpen then return end
+	menuOpen, menuMode, menuButton = false, nil, nil
+	menu:Hide()
+	refreshMenuLegend()
+	-- BaganatorGamepad re-applies its keys next frame; our hook puts Y back on top of them.
+	if bgActive and not suppressed then pokeBaganatorGamepad() end
+end
+
+local function openMenu()
+	if menuOpen or not bgActive or suppressed or InCombatLockdown() or CursorHasItem() then return end
+	if MerchantFrame and MerchantFrame:IsShown() then return end
+	local button = selectedButton()
+	if not button or not containerInfo(button) then return end
+	wipe(menuEntries)
+	for _, action in ipairs(menuActions) do
+		if action.condition(button) then table.insert(menuEntries, action) end
+	end
+	if #menuEntries == 0 then return end
+	menuOpen, menuMode, menuButton, menuIndex = true, "list", button, 1
+	menu:ClearAllPoints()
+	menu:SetPoint("TOPLEFT", button, "TOPRIGHT", 6, 0)
+	layoutMenu()
+	menu:Show()
+	refreshLegend(nil)
+	refreshMenuLegend()
+	moreBound = false -- Y is the menu's "back" until it closes
+	applyMenuBindings()
+end
+
+local function openSplit()
+	local info = containerInfo(menuButton)
+	local count = info and info.stackCount or 0
+	if count < 2 then return closeMenu() end
+	menuMode = "split"
+	splitMax, splitCount = count - 1, 1
+	layoutMenu()
+	refreshMenuLegend()
+end
+
+local function menuMove(delta)
+	if not menuOpen then return end
+	if menuMode == "split" then
+		splitCount = math.max(1, math.min(splitMax, splitCount + delta))
+	elseif #menuEntries > 0 then
+		menuIndex = ((menuIndex - 1 + delta) % #menuEntries) + 1
+	end
+	layoutMenu()
+end
+
+local function menuDirection(direction)
+	if menuMode == "split" then
+		menuMove(({ left = -1, right = 1, up = SPLIT_BIG_STEP, down = -SPLIT_BIG_STEP })[direction])
+	elseif direction == "up" then
+		menuMove(-1)
+	elseif direction == "down" then
+		menuMove(1)
+	end
+end
+
+local function menuSelect()
+	if not menuOpen or not menuButton then return end
+	local button = menuButton
+	if menuMode == "split" then
+		local bag, slot = bagSlot(button)
+		closeMenu()
+		ClearCursor()
+		C_Container.SplitContainerItem(bag, slot, splitCount)
+		return
+	end
+	local entry = menuEntries[menuIndex]
+	if not entry then return end
+	if entry.split then return openSplit() end
+	closeMenu()
+	entry.func(button)
+end
+
+-- Key-down, like BaganatorGamepad's buttons, so a press is consumed on the same edge by whichever addon holds it.
+local function makeButton(name, onClick)
+	local button = CreateFrame("Button", name, UIParent)
+	button:RegisterForClicks("AnyDown")
+	button:SetScript("OnClick", onClick)
+	return button
+end
+makeButton(MORE_BUTTON, openMenu)
+makeButton("BaganatorGamepadNits_MenuUp", function() menuDirection("up") end)
+makeButton("BaganatorGamepadNits_MenuDown", function() menuDirection("down") end)
+makeButton("BaganatorGamepadNits_MenuLeft", function() menuDirection("left") end)
+makeButton("BaganatorGamepadNits_MenuRight", function() menuDirection("right") end)
+makeButton("BaganatorGamepadNits_MenuSelect", menuSelect)
+makeButton("BaganatorGamepadNits_MenuBack", closeMenu)
+
+local function popupShown()
+	return StaticPopup_IsAnyDialogShown ~= nil and StaticPopup_IsAnyDialogShown() == true
+end
+
+-----------------------------------------------------------------------------------------------------------------
 -- State
 
 local function applyState()
@@ -319,7 +707,8 @@ local function applyState()
 	local m = manager()
 	local anyView = ui and #views > 0
 
-	local wantSuppress = anyView and m.isUIFocused or false
+	-- Blizzard popups take A/B through a binding group without focusing the UI; hold BaganatorGamepad back for them too.
+	local wantSuppress = anyView and (m.isUIFocused or popupShown()) or false
 	if wantSuppress ~= suppressed then
 		suppressed = wantSuppress
 		if suppressed then
@@ -343,6 +732,13 @@ local function applyState()
 	local selected = selectedButton()
 	local current = selected and viewOf(selected) or views[1]
 
+	if menuOpen and (not bgActive or suppressed or not menuButton or not menuButton:IsVisible()
+		or (selected ~= nil and selected ~= menuButton)) then
+		closeMenu()
+	end
+	local wantMore = anyView and bgActive and not suppressed and not menuOpen
+	if wantMore ~= moreBound then setMore(wantMore) end
+
 	-- Shop focused: RT hint on the Baganator window, RT hands the keys to BaganatorGamepad.
 	local panel = suppressed and lastFocusedPanel() or nil
 	showRightHint(panel and current or nil)
@@ -358,7 +754,7 @@ local function applyState()
 		if bgActive then setLeft(wantLeft) end
 	end
 
-	refreshLegend((anyView and bgActive and not suppressed) and current or nil)
+	refreshLegend((anyView and bgActive and not suppressed and not menuOpen) and current or nil)
 end
 
 local function schedule()
@@ -384,9 +780,18 @@ hooksecurefunc("SetOverrideBindingClick", function(owner, _, _, button)
 		ClearOverrideBindings(owner)
 		clearingOurselves = false
 		rightBound = false
+		moreBound = false
 		if lastFocusedPanel() then setRight(true) end
-	elseif button == PREVIOUS_WINDOW_BUTTON and wantLeft then
-		SetOverrideBinding(owner, true, KEYS.lt, TOGGLE_UI_FOCUS)
+	else
+		if button == PREVIOUS_WINDOW_BUTTON and wantLeft then
+			SetOverrideBinding(owner, true, KEYS.lt, TOGGLE_UI_FOCUS)
+		end
+		if menuOpen then
+			applyMenuBindings()
+		else
+			SetOverrideBindingClick(owner, true, KEYS.more, MORE_BUTTON)
+			moreBound = true
+		end
 	end
 	schedule()
 end)
@@ -395,6 +800,7 @@ hooksecurefunc("ClearOverrideBindings", function(owner)
 	if owner ~= nil and owner == bgOwner and not clearingOurselves then
 		bgActive = false
 		rightBound = false
+		moreBound = false
 		schedule()
 	end
 end)
@@ -445,6 +851,7 @@ for _, event in ipairs({ "PLAYER_ENTERING_WORLD", "BANKFRAME_OPENED", "MERCHANT_
 end
 events:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_ENTERING_WORLD" or event == "BANKFRAME_OPENED" then scan() end
+	if event == "PLAYER_ENTERING_WORLD" then disarmTrap() end
 	schedule()
 end)
 
@@ -465,6 +872,8 @@ SlashCmdList.BAGANATORGAMEPADNITS = function()
 		.. ", highlight " .. tostring(bgHighlight ~= nil) .. ", suppressed " .. tostring(suppressed)
 		.. ", wantLeft " .. tostring(wantLeft) .. ", rightBound " .. tostring(rightBound)
 		.. ", legend " .. tostring(legend ~= nil) .. ", UI focused " .. tostring(m and m.isUIFocused)
-		.. ", panels " .. tostring(m and m.shownFrames and #m.shownFrames))
+		.. ", panels " .. tostring(m and m.shownFrames and #m.shownFrames)
+		.. ", Baganator trap " .. (_G[TRAP_CLICKER] and (trapFrame and "disarmed" or "NOT FOUND") or "absent")
+		.. ", moreBound " .. tostring(moreBound) .. ", menu " .. tostring(menuOpen and menuMode or false))
 	print("  LT -> " .. tostring(GetBindingByKey(KEYS.lt)) .. ", RT -> " .. tostring(GetBindingByKey(KEYS.rt)))
 end
