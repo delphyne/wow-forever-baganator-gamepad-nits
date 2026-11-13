@@ -4,5 +4,6 @@
 ## Author: Brian M. Carr
 ## Version: 0.2.0
 ## Dependencies: Baganator, BaganatorGamepad
+## SavedVariables: BaganatorGamepadNitsDB
 
 BaganatorGamepadNits.lua

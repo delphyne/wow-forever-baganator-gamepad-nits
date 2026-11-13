@@ -15,6 +15,7 @@
 --    Pet), as our own frame and bindings (see "More actions" below), and BaganatorGamepad's keys held back while
 --    a Blizzard popup (the destroy confirmation, say) is up so the popup gets A/B.
 
+local ADDON_NAME = ...
 local VIEW_PATTERNS = { "BackpackViewFrame", "BankViewFrame" }
 local KEYS = {
 	lt = GAMEPAD_TRIGGER_LEFT or "PADLTRIGGER",
@@ -48,14 +49,21 @@ local pending = false
 
 -- A short log of what was bound and why, for "/bgnits log": binding fights with other controller addons (GamepadXIV,
 -- say) are hard to see after the fact, and a TOGGLEUIFOCUS press with no panel shown only prints Blizzard's
--- "No interface frame to focus".
-local LOG_SIZE = 40
+-- "No interface frame to focus". The ring lives in the saved variable BaganatorGamepadNitsDB (this session's and the
+-- one before, with logCount to put the ring in order), so it can be read from WTF after a /reload.
+local LOG_SIZE = 60
 local log, logCount = {}, 0
 local function note(...)
 	local parts = {}
 	for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
 	logCount = logCount + 1
-	log[(logCount - 1) % LOG_SIZE + 1] = ("%.1f %s"):format(GetTime(), table.concat(parts, " "))
+	log[(logCount - 1) % LOG_SIZE + 1] = ("%s %s"):format(date("%H:%M:%S"), table.concat(parts, " "))
+	if BaganatorGamepadNitsDB then BaganatorGamepadNitsDB.logCount = logCount end
+end
+
+local function attachSavedLog()
+	local old = BaganatorGamepadNitsDB
+	BaganatorGamepadNitsDB = { log = log, logCount = logCount, previous = old and old.log, previousCount = old and old.logCount }
 end
 
 local ownOwner = CreateFrame("Frame", "BaganatorGamepadNits_Owner", UIParent)
@@ -947,10 +955,23 @@ end
 
 local events = CreateFrame("Frame", "BaganatorGamepadNits_Events", UIParent)
 for _, event in ipairs({ "PLAYER_ENTERING_WORLD", "BANKFRAME_OPENED", "MERCHANT_SHOW", "MERCHANT_CLOSED",
-	"PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "CURSOR_CHANGED", "BAG_UPDATE_DELAYED" }) do
+	"PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "CURSOR_CHANGED", "BAG_UPDATE_DELAYED",
+	"ADDON_LOADED", "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
 	events:RegisterEvent(event)
 end
-events:SetScript("OnEvent", function(_, event)
+events:SetScript("OnEvent", function(_, event, arg1, arg2)
+	if event == "ADDON_LOADED" then
+		if arg1 == ADDON_NAME then attachSavedLog() end
+		return
+	end
+	-- A protected call of ours refused by the client: the log must say so, with the function.
+	if event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+		if arg1 == ADDON_NAME then note(event, arg2) end
+		return
+	end
+	if event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" or event == "MERCHANT_SHOW" or event == "MERCHANT_CLOSED" then
+		note(event)
+	end
 	if event == "PLAYER_ENTERING_WORLD" or event == "BANKFRAME_OPENED" then scan() end
 	if event == "PLAYER_ENTERING_WORLD" then disarmTrap() end
 	schedule()
@@ -968,7 +989,7 @@ end)
 SLASH_BAGANATORGAMEPADNITS1 = "/bgnits"
 SlashCmdList.BAGANATORGAMEPADNITS = function(msg)
 	if msg and msg:match("^%s*log%s*$") then
-		print("BaganatorGamepadNits: last " .. math.min(logCount, LOG_SIZE) .. " of " .. logCount .. " events (seconds since login)")
+		print("BaganatorGamepadNits: last " .. math.min(logCount, LOG_SIZE) .. " of " .. logCount .. " events (also saved in BaganatorGamepadNitsDB)")
 		for i = math.max(1, logCount - LOG_SIZE + 1), logCount do print("  " .. log[(i - 1) % LOG_SIZE + 1]) end
 		return
 	end

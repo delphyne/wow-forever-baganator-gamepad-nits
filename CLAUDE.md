@@ -21,8 +21,11 @@ Blizzard gamepad UI in more depth.
 
 ## Layout
 
-- `BaganatorGamepadNits/BaganatorGamepadNits.toc` — Interface 16001, `## Dependencies: Baganator, BaganatorGamepad`.
+- `BaganatorGamepadNits/BaganatorGamepadNits.toc` — Interface 16001, `## Dependencies: Baganator, BaganatorGamepad`,
+  `## SavedVariables: BaganatorGamepadNitsDB` (the event log, nothing else).
 - `BaganatorGamepadNits/BaganatorGamepadNits.lua` — all the logic.
+- `HANDOFF.md` — debugging procedure for the GamepadXIV binding reports: what to run in game, which saved
+  variables to read afterwards, how to unstick the UI.
 - `Makefile` — `make install` symlinks `BaganatorGamepadNits/` into the AddOns folder found by `find-wow-addons.sh`
   (macOS `/Applications`; on Linux Steam/Proton compatdata incl. Flatpak Steam and SD cards, Faugus, Lutris, Heroic,
   Bottles, `~/.wine`); override with `WOW_ADDONS=`; `make where` prints the folder; `make uninstall`; `make check`
@@ -153,9 +156,12 @@ cursor/bag/merchant/combat event, and on a 0.1 s poll (its d-pad moves are invis
   flag. `/bgnits log` shows `stale PADLTRIGGER cleared` if that path ever fires; it should not.
 - Nothing is bound in combat; BaganatorGamepad drops out on `PLAYER_REGEN_DISABLED` and so does everything here.
 - `/bgnits` prints the state (owner found, active, highlight found, suppressed, trap, Y bound, menu mode, what LT/RT
-  are bound to). `/bgnits log` prints the last 40 events (LT/RT/Y set or cleared, suppression changes with the
-  manager's state, BaganatorGamepad owner found/bound/cleared, menu open/close, stale clears) with seconds since
-  login; ask for it with any report of a binding fight.
+  are bound to). `/bgnits log` prints the last 60 events (LT/RT/Y set or cleared, suppression changes with the
+  manager's state, BaganatorGamepad owner found/bound/cleared, menu open/close, stale clears, combat and merchant
+  events, any `ADDON_ACTION_BLOCKED`/`FORBIDDEN` naming this addon) with wall-clock times. The ring is also the
+  saved variable `BaganatorGamepadNitsDB` (`log`, `logCount` to order the ring, `previous`/`previousCount` from the
+  session before), written on `/reload` or logout, so a report can be read from
+  `WTF/Account/<account>/<realm>/<character>/SavedVariables/BaganatorGamepadNits.lua` after the fact.
 - Forever has no global `GetBindingByKey` (only `C_KeyBindings.GetBindingByKey`); a key's current action, override
   bindings included, is `GetBindingAction(key, true)` (`boundAction`). Calling the former cost the legend once: the
   error at the end of `applyState` aborted the pass just before `refreshLegend`.
@@ -181,6 +187,28 @@ cursor/bag/merchant/combat event, and on a 0.1 s poll (its d-pad moves are invis
   "stopped working" and "No interface frame to focus" appeared. That session ran the previous commit (the logged
   stack line numbers), under which Baganator 851 registered the bag as a focused Blizzard panel; the sequence could not
   be reproduced by reading. Hence the trigger audit above and `/bgnits log`; retest on the current version.
+- Second report the same evening, on the current version: with the bag closed, `/gxiv debug` (saved as `debugLog`)
+  showed the d-pad, L1 and RT bound to `CLICK InputFunctionBindingButton_<key>` with no panel shown, and pulling a
+  trigger stuck the UI and printed the message. Those buttons are Blizzard's panel navigation (`InputFunctionBinding`,
+  priority overrides on `UIParent`: SmartNavigation's d-pad group, the manager's LT/RT group), so Blizzard's binding
+  stack was left active after an unfocus. The way that happens: `SmartNavigation:OnHide` and `DeactivateBinding`
+  (`Blizzard_GamepadSmartNavigation/SmartNavigation.lua`, `EnsureIsSecure`) do nothing when `issecure()` is false,
+  and `InputBindingManager`'s `SetOverrideBinding*` calls are blocked in combat from tainted code. A panel unfocused
+  or hidden under taint, in combat above all, leaves its groups behind, and GamepadXIV's non-priority bindings lose
+  to them until a Blizzard panel is focused and unfocused again out of combat (open any window, close it with B or
+  Escape), which runs the stack cleanly. The same error log has `ADDON_ACTION_BLOCKED` on `SetOverrideBindingClick`
+  (29 times, in the chat-focus path: Back → `OPENCHAT` → `FloatingChatFrame:SetGamepadFocus` → `FrameShown`),
+  blamed on GamepadXIV with `ChatFrame1.oldestFadingLineTimestamp (QuestieTrace)` as the tainted value, and
+  `BuffFrame` errors "while execution tainted by 'GamepadXIV'". Nothing of ours is in those stacks, and this addon
+  writes no Blizzard state: EventRegistry callbacks and `hooksecurefunc` hooks are isolated by `securecallfunction`,
+  the hints are Show/Hide on Blizzard's own hint frames, the legend and its prompts are private objects, the
+  bindings sit on BaganatorGamepad's owner. Chat is itself a managed panel (the edit box gaining focus calls
+  `FrameShown` on the chat frame, losing it `FrameHidden`), so Back → chat with the bag open focuses a panel: our RT
+  hint appears on the bag and RT unfocuses the chat, as with the stock bag. Under the previous commit Baganator 851
+  also wrote a tainted `targetButton` into SmartNavigation's panel info for the bag (`SetTargetButtonForFrame`);
+  with `FrameShown` blocked, `GetPanelInfo(frame, true)` finds no panel info and nothing is written. To settle the
+  blame: reproduce once with this addon disabled; if it still happens it is GamepadXIV or Forever, and GamepadXIV's
+  `/gxiv priority on` is its own remedy for losing to Forever's bindings.
 
 ## After a BaganatorGamepad or Blizzard update
 
@@ -222,7 +250,10 @@ cursor/bag/merchant/combat event, and on a 0.1 s poll (its d-pad moves are invis
 - With GamepadXIV loaded: bag open at a merchant, shop focused, RT, then d-pad in the bag, LT back to the shop, RT,
   B to close the bag, walk away. Holding L2/R2 shows the crossbar again as soon as the bag is closed; Back opens chat
   with nothing open and never shows "No interface frame to focus"; `/bgnits log` has no `stale` line and
-  GamepadXIV's `errorLog` names nothing of ours.
+  GamepadXIV's `errorLog` names nothing of ours. Also Back → chat with the bag open (our RT hint on the bag, RT
+  closes the chat focus), and the same cycle during combat. If the d-pad or triggers end up on
+  `InputFunctionBindingButton_*` with nothing open (`/gxiv debug`), note whether it was in combat, then open and
+  close any Blizzard window to unstick it, and read both saved logs.
 - Baganator 847+: open the bag with the controller. Nothing is printed to chat (no `gpb PAD...`, no stick names),
   the d-pad moves BaganatorGamepad's selection, the left stick still moves the character, and X with the merchant
   focused does not click the first bag slot. `/bgnits` reports `Baganator trap disarmed`.
