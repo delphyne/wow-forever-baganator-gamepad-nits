@@ -1,9 +1,9 @@
 ## Interface: 16001
 ## Title: Baganator Gamepad Nits
-## Notes: Small fixes layered on top of BaganatorGamepad for World of Warcraft: Forever's controller UI.
+## Notes: Controller navigation for Baganator bags and bank on World of Warcraft: Forever's controller UI: d-pad, A/X/B, LT/RT paging to Blizzard panels, a button legend and the Y menu. Replaces BaganatorGamepad; do not run both.
 ## Author: Brian M. Carr
-## Version: 0.2.0
-## Dependencies: Baganator, BaganatorGamepad
+## Version: 0.3.0
+## Dependencies: Baganator
 ## SavedVariables: BaganatorGamepadNitsDB
 
 BaganatorGamepadNits.lua

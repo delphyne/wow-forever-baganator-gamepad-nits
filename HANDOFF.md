@@ -5,8 +5,10 @@ Where things stand on 2026-11-13 and how to debug the next report. Background an
 
 ## Current state
 
-- `main` at the commit that adds this file: trigger audit, `slotOf` nil-bag-ID fix, event log saved to disk.
-  Nothing in it is confirmed in game yet (see the version line at the top of `CLAUDE.md`).
+- 0.3.0: the addon no longer sits on top of BaganatorGamepad; it navigates the bag itself and BaganatorGamepad must
+  be disabled (a red warning says so when both are loaded). Nothing in it is confirmed in game yet (see the version
+  line at the top of `CLAUDE.md`). The reports below were made on the old layered design.
+- The toc changed in 0.3.0 (dependency dropped), so the client must be restarted once, not just `/reload`ed.
 - Open problem: with GamepadXIV 0.1.13 loaded, after using the Baganator bag the gamepad UI twice ended up with
   Forever's panel-navigation bindings (`CLICK InputFunctionBindingButton_<key>`) left on the d-pad, L1 and RT with
   nothing open. Pulling a trigger then prints "No interface frame to focus" and the GamepadXIV crossbar is dead.
@@ -22,12 +24,14 @@ with B or Escape. That runs Forever's binding stack cleanly and drops the stale 
 ## When it breaks again, in this order
 
 1. Do not reload yet. In chat, run and screenshot or copy:
-   - `/bgnits` — one-line state: owner/active/suppressed, `wantLeft`/`rightBound`, UI focused, panel count and
-     names, focused frame, popup/merchant/cursor, selected slot, and what Y, LT and RT are bound to right now.
-   - `/bgnits log` — the last 60 events with wall-clock times: every LT/RT/Y set or clear, suppression changes with
-     the manager's `isUIFocused`/panel count, BaganatorGamepad owner found/bound/cleared, menu open/close, combat
-     enter/leave, merchant open/close, and any `ADDON_ACTION_BLOCKED`/`FORBIDDEN` naming this addon. A
-     `stale PADLTRIGGER cleared` / `stale PADRTRIGGER cleared` line means the trigger audit fired; it should never.
+   - `/bgnits` — state: active/suppressed/navigated, item buttons collected, UI focused, panel count and names,
+     focused frame, popup/merchant/cursor, selected slot, re-assert count, whether BaganatorGamepad is loaded, and
+     what LT, RT, A, X, Y, B and d-pad up are bound to right now.
+   - `/bgnits log` — the last 60 events with wall-clock times: `navigation on/off`, a `bound <bag|menu|panel|off>
+     LT .. RT .. Y ..` line each time the binding table changes, suppression changes with the manager's
+     `isUIFocused`/panel count, menu open/close, combat enter/leave, merchant open/close, and any
+     `ADDON_ACTION_BLOCKED`/`FORBIDDEN` naming this addon. The last `bound` line after the bag closes must be
+     `bound off`.
    - `/gxiv debug` — GamepadXIV's view of the bindings (`GetBindingAction(key, true)` for the d-pad, L1, left stick,
      RT). `CLICK InputFunctionBindingButton_*` with no panel shown is the stuck state.
    - `/gxiv status` and `/gxiv log` — GamepadXIV's own state and its Back-cycle play log.
@@ -58,21 +62,23 @@ with B or Escape. That runs Forever's binding stack cleanly and drops the stale 
   closed means the manager's unfocus never reached us (or never happened). Pair it with GamepadXIV's
   `ADDON_ACTION_BLOCKED` entries at the same time: a blocked `SetOverrideBinding*` in `InputBindingManager` or a
   skipped `SmartNavigation:OnHide` is what leaves `InputFunctionBindingButton_*` behind.
-- `LT -> TOGGLEUIFOCUS` or `RT -> TOGGLEUIFOCUS` in `/bgnits` with `panels 0` is our bug (the audit should have
-  cleared it). `LT -> CLICK BaganatorGamepadPreviousWindow` with the bag closed is BaganatorGamepad's owner not
-  cleared; `LT -> CLICK InputFunctionBindingButton_PADLTRIGGER` with `panels 0` is Forever's stack left active.
+- `PADLTRIGGER -> TOGGLEUIFOCUS` or `PADRTRIGGER -> TOGGLEUIFOCUS` in `/bgnits` with `panels 0`, or any
+  `CLICK BaganatorGamepadNits_*` with the bag closed, is our bug (the state pass should have cleared the owner).
+  `CLICK BaganatorGamepad<Something>` without `Nits_` is the BaganatorGamepad addon, which must be disabled;
+  `CLICK InputFunctionBindingButton_PADLTRIGGER` with `panels 0` is Forever's stack left active.
 
 ## Where the code is
 
 - Log ring and saved variable: `note()`, `attachSavedLog()` near the top of `BaganatorGamepadNits/BaganatorGamepadNits.lua`.
-- Trigger audit: `dropToggleFocus`, `leftFocusTarget`, the end of `applyState`, and the
-  `SetOverrideBindingClick` hook.
+- Navigation: `collectItems`, `nearest`, `reselect`, `display` and the buttons after them. Bindings: `wantBindings`
+  (what each key should do in the current state), `applyBindings`, `onForeignBinding` (re-assert). State:
+  `applyState`.
 - Event frame (combat, merchant, `ADDON_ACTION_*`): the `RegisterEvent` loop near the bottom; `/bgnits` is the
   last block in the file.
 - Blizzard references (Forever 1.60.1 source, `Gethe/wow-ui-source` branch `forever`):
   `Blizzard_GamepadSharedUtility/FrameControlsManager.lua` (`SetUIFocusState`, `ERROR_NO_FRAME_TO_FOCUS`),
   `Blizzard_GamepadSharedUtility/InputBindingStack/InputBindingManager.lua`,
   `Blizzard_GamepadSmartNavigation/SmartNavigation.lua` (`EnsureIsSecure`, `OnHide`, `DeactivateBinding`).
-- `make check` syntax-checks; `make install` symlinks into the AddOns folder; `/reload` picks up Lua changes, a
+- `make check` syntax-checks; `make test` runs the stubbed walk-through in `tests/walkthrough.lua`; `make install` symlinks into the AddOns folder; `/reload` picks up Lua changes, a
   toc change (new saved variable) needs a full client restart (the toc is read at launch; `/reload` and relog keep the old one). Until then the
   log is still printed by `/bgnits log` but not saved.

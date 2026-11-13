@@ -9,7 +9,7 @@ ifndef WOW_ADDONS
 WOW_ADDONS := $(shell sh ./find-wow-addons.sh)
 endif
 
-.PHONY: install uninstall check where
+.PHONY: install uninstall check test where
 
 install: where
 	mkdir -p "$(WOW_ADDONS)"
@@ -28,3 +28,6 @@ endif
 
 check:
 	luajit -bl $(NAME)/$(NAME).lua > /dev/null && echo "syntax ok"
+
+test: check
+	luajit tests/walkthrough.lua $(NAME)/$(NAME).lua
