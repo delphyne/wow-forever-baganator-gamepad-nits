@@ -14,9 +14,10 @@ addon (controller navigation for Baganator bags) on **World of Warcraft: Forever
    (hunters). Drawn and navigated by this addon; see below for why Blizzard's menu cannot be used. BaganatorGamepad's
    keys are also held back while a Blizzard popup (the destroy confirmation) is up, so the popup gets A/B.
 
-Written against BaganatorGamepad 2.1.0, Baganator 847, Forever client 1.60.1 (Interface 16001), 2026-11-11.
-Not yet confirmed in game at the time of writing; update this line when it is. Sibling of
-`wow-forever-questie-gamepad` (QuestieGamepad), which documents the Blizzard gamepad UI in more depth.
+Written against BaganatorGamepad 2.1.0, Baganator 851, Forever client 1.60.1 (Interface 16001, build 70938),
+2026-11-12, alongside GamepadXIV 0.1.13 (see "Other controller addons"). Not yet confirmed in game at the time of
+writing; update this line when it is. Sibling of `wow-forever-questie-gamepad` (QuestieGamepad), which documents the
+Blizzard gamepad UI in more depth.
 
 ## Layout
 
@@ -35,7 +36,8 @@ BaganatorGamepad keeps everything local. What this addon can see of it:
   `BaganatorGamepadBackButton`, `BaganatorGamepadUseButton`, `BaganatorGamepadSellButton`,
   `BaganatorGamepadPreviousWindow` (LT), `BaganatorGamepadNextWindow` (RT).
 - Its **binding owner** is an anonymous frame; we learn it from a `hooksecurefunc("SetOverrideBindingClick")` when it
-  binds one of those names, and track whether it believes it is active (last call was a bind, not a
+  binds one of exactly those names (`BG_BUTTONS`; Baganator 847-849's own `BaganatorGamepadClicker` shares the
+  prefix and must not count), and track whether it believes it is active (last call was a bind, not a
   `ClearOverrideBindings` of that owner).
 - Its **selection border** is an anonymous `BackdropTemplate` frame on `UIParent`, strata `TOOLTIP`, border colour
   (1, 0.82, 0); found once with `EnumerateFrames` (at most three attempts; every `EnumerateFrames` loop must check
@@ -69,8 +71,10 @@ BaganatorGamepad keeps everything local. What this addon can see of it:
   addon code. No setting, private functions. We `hooksecurefunc(C_Timer, "After")`, and for zero-delay callbacks
   whose `debugstack` names one of those two files, `setfenv` the callback to an environment whose
   `GamepadMode.FrameControlsManager` is a stub (everything else falls through to `_G`). `/bgnits` reports
-  `Baganator native nav blocked <n>` (counts up once per bag open). Its `SmartNavigation_Add*JumpNavigationOverride`
-  / `SetTargetButtonForFrame` calls are not intercepted. If Baganator moves the call, drops the timer, or adds a
+  `Baganator native nav blocked <n>` (counts up once per bag open). Baganator's customise dialog
+  (`CustomiseDialog/Main.lua`) announces itself through the same `AnnounceShow`; a stack naming `CustomiseDialog` is
+  left alone, so the dialog stays a focusable panel. Its `SmartNavigation_Add*JumpNavigationOverride` /
+  `SetTargetButtonForFrame` calls are not intercepted. If Baganator moves the call, drops the timer, or adds a
   setting, revisit: `grep -rn "FrameControlsManager\|IsGamepadInUse" Baganator`.
 - **Stock Y menu** (`Blizzard_UIPanels_Game/Mainline/ContainerFrame.lua`, `SetupGamepad`, `itemMoreActions`): a
   `GamepadSharedUtility.CreateMoreActionsPromptedBinding(GAMEPAD_FACE_TOP)` whose entries are Feed to Pet
@@ -139,17 +143,51 @@ cursor/bag/merchant/combat event, and on a 0.1 s poll (its d-pad moves are invis
   BaganatorGamepad), B goes back to the bag. A second legend under the menu shows A/B (and the d-pad amount in split
   mode); the bag legend is hidden meanwhile and shows a Y "More Actions" prompt otherwise.
 - **Popups**: `StaticPopup_IsAnyDialogShown()` counts as a focused panel for the suppression above, so Blizzard's
-  popup bindings are not fought by BaganatorGamepad's re-asserts. No RT hint is shown in that state.
+  popup bindings are not fought by BaganatorGamepad's re-asserts. No RT hint is shown in that state
+  (`lastFocusedPanel` requires `isUIFocused`: `TOGGLEUIFOCUS` would focus the panel, not leave it).
+- **Trigger audit**: a `TOGGLEUIFOCUS` press with no panel shown does nothing but print Blizzard's
+  `ERROR_NO_FRAME_TO_FOCUS` ("No interface frame to focus", `FrameControlsManager.lua` `SetUIFocusState`), and the only
+  keys that run that command are Forever's Back and our LT/RT. So after every state pass a trigger still bound to it
+  that the state no longer calls for is cleared (`dropToggleFocus`, BaganatorGamepad poked to put its window switch
+  back), and the LT re-set in the `SetOverrideBindingClick` hook re-checks `leftFocusTarget()` instead of the cached
+  flag. `/bgnits log` shows `stale PADLTRIGGER cleared` if that path ever fires; it should not.
 - Nothing is bound in combat; BaganatorGamepad drops out on `PLAYER_REGEN_DISABLED` and so does everything here.
 - `/bgnits` prints the state (owner found, active, highlight found, suppressed, trap, Y bound, menu mode, what LT/RT
-  are bound to).
+  are bound to). `/bgnits log` prints the last 40 events (LT/RT/Y set or cleared, suppression changes with the
+  manager's state, BaganatorGamepad owner found/bound/cleared, menu open/close, stale clears) with seconds since
+  login; ask for it with any report of a binding fight.
+- Forever has no global `GetBindingByKey` (only `C_KeyBindings.GetBindingByKey`); a key's current action, override
+  bindings included, is `GetBindingAction(key, true)` (`boundAction`). Calling the former cost the legend once: the
+  error at the end of `applyState` aborted the pass just before `refreshLegend`.
+- Item buttons are only trusted through `slotOf` (numeric `GetBagID()` and `GetID()`): Baganator's bag-slot and
+  other buttons answer `GetBagID` with nil, and `C_Container.GetContainerItemInfo(nil)` raises an error (19 of them
+  in GamepadXIV's error log on 2026-11-12, from the legend refresh).
+
+## Other controller addons
+
+- **GamepadXIV** (`GamepadXIV/Input.lua`, `Snippets.lua`): an FFXIV-style crossbar. A `SecureHandlerStateTemplate`
+  driver sets non-priority override bindings on itself from restricted snippets, so our `hooksecurefunc` hooks (and
+  BaganatorGamepad's re-assert) never see them. L2/R2 are its crossbar modifiers; Back cycles windows by reading
+  `shownFrames`/`isUIFocused`/`focusedFrame` (never calling the manager) and clicking Forever's own
+  `InputFunctionBindingButton_PADRTRIGGER`, binding `OPENCHAT` with nothing open, or leaving Back to Forever's
+  `TOGGLEUIFOCUS` while an unfocused panel is shown. It re-syncs after `InputBindingManager:RemoveSet`/`ClearBindings`,
+  because Blizzard writes empty non-priority overrides on `UIParent` when a binding set goes.
+- While a Baganator window is open, BaganatorGamepad's priority d-pad, face and LT/RT bindings beat GamepadXIV's, so
+  its crossbar is unavailable then, with or without this addon (GamepadXIV accepts the same from any focused Blizzard
+  panel). Our LT/RT `TOGGLEUIFOCUS` takes nothing more from it; from the navigated bag its Back focuses the panel
+  exactly as our LT does. Once the Baganator window closes BaganatorGamepad clears its owner, ours included.
+- Its `errorLog` (saved variable `GamepadXIVDB`, via `seterrorhandler`) keeps other addons' Lua errors with stacks;
+  read it after a test session. Report of 2026-11-12: after RT handed the bag to BaganatorGamepad, GamepadXIV
+  "stopped working" and "No interface frame to focus" appeared. That session ran the previous commit (the logged
+  stack line numbers), under which Baganator 851 registered the bag as a focused Blizzard panel; the sequence could not
+  be reproduced by reading. Hence the trigger audit above and `/bgnits log`; retest on the current version.
 
 ## After a BaganatorGamepad or Blizzard update
 
 - `grep -n "CreateFrame(\"Button\", \"BaganatorGamepad\|bindingOwner\|SetBackdropBorderColor\|onForeignBinding" BaganatorGamepad.lua`
   in the installed addon: button names, owner handling and border colour are what this addon keys on.
-- Blizzard: `TOGGLEUIFOCUS` still in `Blizzard_Gamepad/Bindings.xml`; `shownFrames`/`focusedFrame`/`isUIFocused` and
-  `Gamepad.RefreshFrameFocus` in `FrameControlsManager.lua`; `LeftJumpHint`/`FocusJumpHint` in `FocusEffects.lua`;
+- Blizzard: `TOGGLEUIFOCUS` still in `Blizzard_Gamepad/Bindings.xml`; `shownFrames`/`focusedFrame`/`isUIFocused`,
+  `ERROR_NO_FRAME_TO_FOCUS` in `SetUIFocusState` and `Gamepad.RefreshFrameFocus` in `FrameControlsManager.lua`; `LeftJumpHint`/`FocusJumpHint` in `FocusEffects.lua`;
   `InputPromptLegends.CreateInputLegend` and `RefreshWithPromptedBindings` in `InputLegendPromptGroup.lua`.
 - If BaganatorGamepad grows its own panel paging, legend or Y menu, retire the corresponding part here. If it starts
   binding `PAD4` itself, our Y re-set in the `SetOverrideBindingClick` hook will fight it; drop ours.
@@ -181,6 +219,10 @@ cursor/bag/merchant/combat event, and on a 0.1 s poll (its d-pad moves are invis
   navigation. Y with an item held, or at a merchant, does nothing. Open chat (type nothing), close it with the
   chat box still focused, Y: Share in Chat is listed and A inserts the link. Hunters: Y on pet food lists Feed to Pet.
   `/bgnits` reports `moreBound true, menu false` with the menu closed.
+- With GamepadXIV loaded: bag open at a merchant, shop focused, RT, then d-pad in the bag, LT back to the shop, RT,
+  B to close the bag, walk away. Holding L2/R2 shows the crossbar again as soon as the bag is closed; Back opens chat
+  with nothing open and never shows "No interface frame to focus"; `/bgnits log` has no `stale` line and
+  GamepadXIV's `errorLog` names nothing of ours.
 - Baganator 847+: open the bag with the controller. Nothing is printed to chat (no `gpb PAD...`, no stick names),
   the d-pad moves BaganatorGamepad's selection, the left stick still moves the character, and X with the merchant
   focused does not click the first bag slot. `/bgnits` reports `Baganator trap disarmed`.

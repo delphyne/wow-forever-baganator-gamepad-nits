@@ -46,6 +46,18 @@ local clearingOurselves = false
 local rebindingOurselves = false
 local pending = false
 
+-- A short log of what was bound and why, for "/bgnits log": binding fights with other controller addons (GamepadXIV,
+-- say) are hard to see after the fact, and a TOGGLEUIFOCUS press with no panel shown only prints Blizzard's
+-- "No interface frame to focus".
+local LOG_SIZE = 40
+local log, logCount = {}, 0
+local function note(...)
+	local parts = {}
+	for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+	logCount = logCount + 1
+	log[(logCount - 1) % LOG_SIZE + 1] = ("%.1f %s"):format(GetTime(), table.concat(parts, " "))
+end
+
 local ownOwner = CreateFrame("Frame", "BaganatorGamepadNits_Owner", UIParent)
 local noopButton = CreateFrame("Button", "BaganatorGamepadNits_Noop", UIParent)
 
@@ -80,10 +92,12 @@ end
 
 -- The Blizzard panel RT would hand off from: the focused one, when it is last in the manager's screen-ordered
 -- list, so Blizzard's own RT (focus next frame) has nothing to do there. The stock bag sorts last the same way.
+-- Only while the UI is focused: TOGGLEUIFOCUS would otherwise focus the panel instead of leaving it (with only a
+-- popup up, say).
 local function lastFocusedPanel()
 	local m = manager()
 	local frames = m and m.shownFrames
-	if not frames or #frames == 0 then return end
+	if not frames or #frames == 0 or not m.isUIFocused then return end
 	local frame = m.focusedFrame
 	if frame and frame == frames[#frames] and frame:IsShown() then return frame end
 end
@@ -126,11 +140,20 @@ local function highlight()
 	return bgHighlight
 end
 
+-- The bag and slot of a Baganator item button, or nothing. Baganator's bag-slot and other buttons answer GetBagID
+-- too, with nil, and the container API raises an error on that.
+local function slotOf(button)
+	if not button or not button.GetBagID or not button.GetID then return end
+	local ok, bag = pcall(button.GetBagID, button)
+	local slot = button:GetID()
+	if ok and type(bag) == "number" and type(slot) == "number" then return bag, slot end
+end
+
 local function highlightTarget()
 	local border = highlight()
 	if not border then return end
 	local _, relativeTo = border:GetPoint(1)
-	if relativeTo and relativeTo.GetBagID and relativeTo:IsVisible() and viewOf(relativeTo) then return relativeTo end
+	if relativeTo and slotOf(relativeTo) and relativeTo:IsVisible() and viewOf(relativeTo) then return relativeTo end
 end
 
 -- The item button BaganatorGamepad has selected: the one its border is anchored to, else the one whose tooltip
@@ -143,14 +166,15 @@ local function selectedButton()
 	end
 	if GameTooltip:IsShown() then
 		local owner = GameTooltip:GetOwner()
-		if owner and owner.GetBagID and owner:IsVisible() and viewOf(owner) then return owner end
+		if owner and slotOf(owner) and owner:IsVisible() and viewOf(owner) then return owner end
 	end
 end
 
 local function selectedItemID()
 	local button = selectedButton()
-	if not button then return end
-	local info = C_Container.GetContainerItemInfo(button:GetBagID(), button:GetID())
+	local bag, slot = slotOf(button)
+	if not bag then return end
+	local info = C_Container.GetContainerItemInfo(bag, slot)
 	return info and info.itemID, button
 end
 
@@ -165,12 +189,14 @@ end
 
 local function setRight(on)
 	if not canBind() then return end
+	note("RT", on and TOGGLE_UI_FOCUS or "cleared")
 	SetOverrideBinding(bgOwner, true, KEYS.rt, on and TOGGLE_UI_FOCUS or nil)
 	rightBound = on
 end
 
 local function setLeft(on)
 	if not canBind() then return end
+	note("LT", on and TOGGLE_UI_FOCUS or PREVIOUS_WINDOW_BUTTON)
 	if on then
 		SetOverrideBinding(bgOwner, true, KEYS.lt, TOGGLE_UI_FOCUS)
 	else
@@ -196,6 +222,30 @@ local function pokeBaganatorGamepad()
 	if InCombatLockdown() then return end
 	SetOverrideBindingClick(ownOwner, true, KEYS.rt, noopButton:GetName())
 	ClearOverrideBindings(ownOwner)
+end
+
+-- What a key does right now, override bindings included. (Forever has no global GetBindingByKey, only
+-- C_KeyBindings.GetBindingByKey; GetBindingAction with checkOverride is the one that sees override bindings.)
+local function boundAction(key)
+	return GetBindingAction(key, true)
+end
+
+-- A trigger still running TOGGLEUIFOCUS when the state above no longer calls for it (whatever path left it there) is
+-- taken back, and BaganatorGamepad asked to put its own window switch on it again.
+local function dropToggleFocus(key)
+	if not canBind() or boundAction(key) ~= TOGGLE_UI_FOCUS then return end
+	note("stale", key, "cleared")
+	SetOverrideBinding(bgOwner, true, key, nil)
+	if key == KEYS.rt then rightBound = false end
+	if bgActive then pokeBaganatorGamepad() end
+end
+
+-- The Blizzard panel LT should focus from the navigated Baganator window: one Baganator window open (with two,
+-- BaganatorGamepad uses LT/RT to switch between them), BaganatorGamepad holding the keys, and a panel to go to.
+local function leftFocusTarget(views)
+	views = views or visibleViews()
+	if not gamepadUI() or #views ~= 1 or suppressed or not bgActive then return end
+	return unfocusedPanel()
 end
 
 -----------------------------------------------------------------------------------------------------------------
@@ -264,7 +314,10 @@ if C_Timer and C_Timer.After and setfenv and debugstack then
 	hooksecurefunc(C_Timer, "After", function(seconds, callback)
 		if seconds ~= 0 or type(callback) ~= "function" then return end
 		local stack = debugstack(2, 6, 0)
-		if stack and (stack:find("Baganator[/\\]ItemViewCommon[/\\]Gamepad%.lua") or stack:find("Baganator[/\\]ItemViewCommon[/\\]BankView%.lua")) then
+		-- Baganator's customise dialog announces itself through the same AnnounceShow; it is no bag, so it keeps its
+		-- focus.
+		if stack and not stack:find("CustomiseDialog")
+			and (stack:find("Baganator[/\\]ItemViewCommon[/\\]Gamepad%.lua") or stack:find("Baganator[/\\]ItemViewCommon[/\\]BankView%.lua")) then
 			pcall(setfenv, callback, stubEnv)
 		end
 	end)
@@ -429,10 +482,11 @@ local menuIndex = 1
 local menuButton -- the Baganator item button the menu was opened on
 local splitCount, splitMax = 1, 1
 
-local function bagSlot(button) return button:GetBagID(), button:GetID() end
+local bagSlot = slotOf
 
 local function containerInfo(button)
-	return C_Container.GetContainerItemInfo(bagSlot(button))
+	local bag, slot = slotOf(button)
+	if bag then return C_Container.GetContainerItemInfo(bag, slot) end
 end
 
 local function activeChatEditBox()
@@ -621,6 +675,7 @@ end
 
 local function setMore(on)
 	if not canBind() then return end
+	note("Y", on and MORE_BUTTON or "cleared")
 	if on then
 		SetOverrideBindingClick(bgOwner, true, KEYS.more, MORE_BUTTON)
 	else
@@ -632,6 +687,7 @@ end
 local function closeMenu()
 	if not menuOpen then return end
 	menuOpen, menuMode, menuButton = false, nil, nil
+	note("menu closed")
 	menu:Hide()
 	refreshMenuLegend()
 	-- BaganatorGamepad re-applies its keys next frame; our hook puts Y back on top of them.
@@ -649,6 +705,7 @@ local function openMenu()
 	end
 	if #menuEntries == 0 then return end
 	menuOpen, menuMode, menuButton, menuIndex = true, "list", button, 1
+	note("menu opened")
 	menu:ClearAllPoints()
 	menu:SetPoint("TOPLEFT", button, "TOPRIGHT", 6, 0)
 	layoutMenu()
@@ -738,6 +795,7 @@ local function applyState()
 	local wantSuppress = anyView and (m.isUIFocused or popupShown()) or false
 	if wantSuppress ~= suppressed then
 		suppressed = wantSuppress
+		note("suppressed", suppressed, "UI focused", m and m.isUIFocused, "popup", popupShown(), "panels", m and m.shownFrames and #m.shownFrames)
 		if suppressed then
 			if bgActive then releaseBaganatorGamepad() end
 		else
@@ -773,13 +831,19 @@ local function applyState()
 
 	-- Baganator window navigated: LT hint on the panel, LT focuses it. Left alone when two Baganator windows are
 	-- open, where BaganatorGamepad uses LT/RT to switch between them.
-	local focusTarget = (anyView and not suppressed and bgActive and #views == 1) and unfocusedPanel() or nil
+	local focusTarget = leftFocusTarget(views)
 	setLeftHint(focusTarget)
 	local newWantLeft = focusTarget ~= nil
 	if newWantLeft ~= wantLeft then
 		wantLeft = newWantLeft
 		if bgActive then setLeft(wantLeft) end
 	end
+
+	-- Neither trigger may keep TOGGLEUIFOCUS beyond the states above: pressed with no panel shown it only prints
+	-- Blizzard's "No interface frame to focus", and it hides whatever else the trigger should do (BaganatorGamepad's
+	-- window switch, GamepadXIV's crossbar once the bag is closed).
+	if not wantLeft then dropToggleFocus(KEYS.lt) end
+	if not rightBound then dropToggleFocus(KEYS.rt) end
 
 	refreshLegend((anyView and bgActive and not suppressed and not menuOpen) and current or nil)
 end
@@ -793,12 +857,20 @@ local function schedule()
 	end)
 end
 
+-- BaganatorGamepad's named buttons. Binding one of them is how its owner frame is recognised; nothing else may count
+-- (Baganator 847-849's own BaganatorGamepadClicker shares the prefix).
+local BG_BUTTONS = {}
+for _, name in ipairs({ "BaganatorGamepadNav_up", "BaganatorGamepadNav_down", "BaganatorGamepadNav_left", "BaganatorGamepadNav_right",
+	"BaganatorGamepadPickupButton", "BaganatorGamepadBackButton", "BaganatorGamepadUseButton", "BaganatorGamepadSellButton",
+	PREVIOUS_WINDOW_BUTTON, "BaganatorGamepadNextWindow" }) do
+	BG_BUTTONS[name] = true
+end
+
 -- BaganatorGamepad binding its named buttons: learn its owner, and re-apply our changes on top of its.
 hooksecurefunc("SetOverrideBindingClick", function(owner, _, _, button)
-	if rebindingOurselves or type(button) ~= "string" or not button:find("^BaganatorGamepad")
-		or button:find("^BaganatorGamepadNits") then
-		return
-	end
+	if rebindingOurselves or not BG_BUTTONS[button] then return end
+	if bgOwner ~= owner then note("BaganatorGamepad owner", bgOwner and "changed" or "found") end
+	if not bgActive then note("BaganatorGamepad bound, suppressed", suppressed) end
 	bgOwner = owner
 	bgActive = true
 	if InCombatLockdown() then return schedule() end
@@ -810,7 +882,8 @@ hooksecurefunc("SetOverrideBindingClick", function(owner, _, _, button)
 		moreBound = false
 		if lastFocusedPanel() then setRight(true) end
 	else
-		if button == PREVIOUS_WINDOW_BUTTON and wantLeft then
+		-- Checked afresh, not from the cached wantLeft: the panel may be gone since the last state pass.
+		if button == PREVIOUS_WINDOW_BUTTON and wantLeft and leftFocusTarget() then
 			SetOverrideBinding(owner, true, KEYS.lt, TOGGLE_UI_FOCUS)
 		end
 		if menuOpen then
@@ -825,6 +898,7 @@ end)
 
 hooksecurefunc("ClearOverrideBindings", function(owner)
 	if owner ~= nil and owner == bgOwner and not clearingOurselves then
+		if bgActive then note("BaganatorGamepad cleared its bindings") end
 		bgActive = false
 		rightBound = false
 		moreBound = false
@@ -892,7 +966,12 @@ events:SetScript("OnUpdate", function(_, dt)
 end)
 
 SLASH_BAGANATORGAMEPADNITS1 = "/bgnits"
-SlashCmdList.BAGANATORGAMEPADNITS = function()
+SlashCmdList.BAGANATORGAMEPADNITS = function(msg)
+	if msg and msg:match("^%s*log%s*$") then
+		print("BaganatorGamepadNits: last " .. math.min(logCount, LOG_SIZE) .. " of " .. logCount .. " events (seconds since login)")
+		for i = math.max(1, logCount - LOG_SIZE + 1), logCount do print("  " .. log[(i - 1) % LOG_SIZE + 1]) end
+		return
+	end
 	local m = manager()
 	print("BaganatorGamepadNits: gamepad UI " .. tostring(gamepadUI()) .. ", views " .. #visibleViews()
 		.. ", BaganatorGamepad owner " .. tostring(bgOwner ~= nil) .. " active " .. tostring(bgActive)
@@ -909,11 +988,13 @@ SlashCmdList.BAGANATORGAMEPADNITS = function()
 	end
 	local focused = m and m.focusedFrame
 	local button = selectedButton()
+	local bag, slot = slotOf(button)
 	print("  panels: " .. (#names > 0 and table.concat(names, ", ") or "none")
 		.. "; focused " .. tostring(focused and (focused.GetName and focused:GetName() or focused))
 		.. "; popup " .. tostring(popupShown()) .. ", merchant " .. tostring(MerchantFrame and MerchantFrame:IsShown() or false)
 		.. ", cursor item " .. tostring(CursorHasItem())
-		.. ", selected slot " .. (button and (button:GetBagID() .. "/" .. button:GetID()) or "none")
-		.. ", Y -> " .. tostring(GetBindingByKey(KEYS.more)))
-	print("  LT -> " .. tostring(GetBindingByKey(KEYS.lt)) .. ", RT -> " .. tostring(GetBindingByKey(KEYS.rt)))
+		.. ", selected slot " .. (bag and (bag .. "/" .. slot) or "none")
+		.. ", Y -> " .. tostring(boundAction(KEYS.more)))
+	print("  LT -> " .. tostring(boundAction(KEYS.lt)) .. ", RT -> " .. tostring(boundAction(KEYS.rt))
+		.. "; /bgnits log for the last binding changes")
 end
