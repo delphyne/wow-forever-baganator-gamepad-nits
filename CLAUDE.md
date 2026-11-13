@@ -35,6 +35,8 @@ API only (`make test`), not in game; update this line when it is. Sibling of
   bindings as a table per owner) and pressed through navigation, shop paging, the Y menu, bag + bank, combat and
   the BaganatorGamepad warning. It checks our logic, not Blizzard's binding priority, secure buttons or Baganator's
   real frames. Extend it when behaviour changes; a new global the addon calls may need a stub.
+- `README.md` — for players: what the addon does and a table of every button in each state. Keep it in step with
+  "Behaviour" below.
 - `HANDOFF.md` — debugging procedure for the GamepadXIV binding reports: what to run in game, which saved
   variables to read afterwards, how to unstick the UI.
 - `Makefile` — `make install` symlinks `BaganatorGamepadNits/` into the AddOns folder found by `find-wow-addons.sh`
