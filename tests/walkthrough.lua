@@ -109,6 +109,8 @@ end
 local bag = makeView("Baganator_SingleViewBackpackViewFrameblizzard", 500, 3, 2, 0)
 local bank = makeView("Baganator_SingleViewBankViewFrameblizzard", 100, 2, 1, -1)
 
+stack = "" -- what debugstack reports to the C_Timer.After hook
+function debugstack() return stack end
 assert(loadfile(path))("BaganatorGamepadNits")
 local ev = _G.BaganatorGamepadNits_Events.scripts.OnEvent
 local own = _G.BaganatorGamepadNits_Owner
@@ -151,6 +153,18 @@ m.shownFrames = { MerchantFrame }; m.focusedFrame = MerchantFrame
 fire("MERCHANT_SHOW"); Tick()
 eq(bindings[own].PADLTRIGGER, "TOGGLEUIFOCUS", "LT focuses the shop")
 eq(press("PAD3"), "CLICK BaganatorGamepadNits_Sell", "X sells"); eq(sold, "0/1", "sold")
+-- Baganator relays out after the sale and reuses the pooled buttons: the object under the border now draws another
+-- place (in a category view, the empty-slot placeholder). The border stays where the item was.
+local function buttonWithID(id) for _, holder in ipairs(bag.children) do if holder.children[1].id == id then return holder.children[1] end end end
+local b1, b2 = buttonWithID(1), buttonWithID(2)
+b1.rect, b2.rect = b2.rect, b1.rect
+viewComplete(); Tick(); eq(sel(), 2, "border stays in place, not on the pooled button")
+b1.rect, b2.rect = b2.rect, b1.rect
+viewComplete(); Tick(); eq(sel(), 1, "and again when the buttons swap back")
+for _, holder in ipairs(bag.children) do local r = holder.children[1].rect; r[1] = r[1] + 5 end
+viewComplete(); Tick(); eq(sel(), 1, "a small shift of the whole layout keeps the button")
+for _, holder in ipairs(bag.children) do local r = holder.children[1].rect; r[1] = r[1] - 5 end
+viewComplete(); Tick(); eq(sel(), 1, "and back")
 press("PAD4"); eq(_G.BaganatorGamepadNits_Menu.shown, false, "no menu at a merchant")
 press("PADLTRIGGER"); Tick()
 eq(count(), 1, "only RT while the shop is focused"); eq(bindings[own].PADRTRIGGER, "TOGGLEUIFOCUS", "RT leaves the shop")
@@ -189,11 +203,38 @@ eq(count(), 10, "back after combat"); eq(sel(), 2, "selection restored")
 -- B closes both
 press("PAD2"); eq(bag.shown or bank.shown, false, "closed"); eq(count(), 0, "keys given back"); Tick()
 eq(count(), 0, "still nothing bound")
+-- Baganator's own hand-off of a view to Blizzard's manager, deferred through C_Timer.After(0, ...): the closure's
+-- GamepadMode must be redirected to our stub when the stack shows a bag or bank view announcing itself, and left
+-- alone for Baganator's other panels. Each case is a fresh closure, as in Baganator (setfenv is per function).
+local handedOff = 0
+GamepadMode.FrameControlsManager.FrameShown = function() handedOff = handedOff + 1 end
+local function announce() return function() GamepadMode.FrameControlsManager:FrameShown(bag) end end
+local function defer(delay, trace) stack = trace; local fn = announce(); C_Timer.After(delay, fn); fn() end
+local V = "Interface/AddOns/Baganator/"
+defer(0, V .. "Core/Gamepad.lua:32: in function `AnnounceShow'\n" .. V .. "ItemViewCommon/BackpackView.lua:150: in function <...>")
+eq(handedOff, 0, "855 bag announce blocked")
+defer(0, V .. "Core/Gamepad.lua:32: in function `AnnounceShow'\n" .. V .. "ItemViewCommon/BankView.lua:159: in function <...>")
+eq(handedOff, 0, "855 bank announce blocked")
+defer(0, V .. "ItemViewCommon/Gamepad.lua:20: in function `AnnounceShow'\n" .. V .. "ItemViewCommon/BackpackView.lua:140: in function <...>")
+eq(handedOff, 0, "851 bag announce blocked")
+defer(0, V .. "ItemViewCommon/BankView.lua:150: in function <...>")
+eq(handedOff, 0, "851 bank announce blocked")
+defer(0, V .. "Core/Gamepad.lua:32: in function `AnnounceShow'\n" .. V .. "CustomiseDialog/Main.lua:1259: in function <...>")
+eq(handedOff, 1, "customise dialog keeps its focus")
+defer(0, V .. "Core/Gamepad.lua:32: in function `AnnounceShow'\n" .. V .. "Core/Dialogs.lua:32: in function <...>")
+eq(handedOff, 2, "Baganator popups keep their focus")
+defer(0, V .. "ItemViewCommon/CurrencyPanel.lua:14: in function <...>")
+eq(handedOff, 3, "the currency panel's own timer is not a view announce")
+defer(1, V .. "Core/Gamepad.lua:32: in function `AnnounceShow'\n" .. V .. "ItemViewCommon/BackpackView.lua:150: in function <...>")
+eq(handedOff, 4, "only zero-delay timers are looked at")
 -- conflict
 bgLoaded = true; fire("ADDON_LOADED", "BaganatorGamepad")
 local printed = {}
 print = function(text) table.insert(printed, text) end
 SlashCmdList.BAGANATORGAMEPADNITS(""); SlashCmdList.BAGANATORGAMEPADNITS("log")
 eq(printed[1]:find("BaganatorGamepad addon is also enabled", 1, true) ~= nil, true, "/bgnits repeats the warning")
+local blocked = false
+for _, line in ipairs(printed) do if line:find("native nav blocked 4", 1, true) then blocked = true end end
+eq(blocked, true, "/bgnits counts the blocked announces")
 eq(printed[#printed]:find("BaganatorGamepad is loaded too", 1, true) ~= nil, true, "the log names the conflict")
 realPrint("walk-through ok")

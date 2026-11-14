@@ -49,7 +49,7 @@ local items = {} -- { frame, x, y } for every item button of currentView, as of 
 local itemsDirty = true -- the window was shown, hidden or laid out again; collect the buttons afresh
 local selected -- the entry of `items` under the border
 local currentView -- the d-pad moves inside this window; LT/RT switch windows
-local lastSelected = setmetatable({}, { __mode = "k" }) -- window -> item button, to come back to
+local lastSelected = setmetatable({}, { __mode = "k" }) -- window -> { frame, x, y } of its last selection, to come back to
 local active = false -- a Baganator window is open, controller UI on, out of combat
 local suppressed = false -- active, but a Blizzard panel or popup has the controller; we bind (almost) nothing
 local navigated = false -- active and not suppressed: our keys are bound, the border is shown
@@ -219,21 +219,34 @@ useButton:RegisterForClicks("AnyUp", "AnyDown")
 
 local function setSelected(entry)
 	selected = entry
-	if entry and currentView then lastSelected[currentView] = entry.frame end
+	if entry and currentView then lastSelected[currentView] = { frame = entry.frame, x = entry.x, y = entry.y } end
 	if not InCombatLockdown() then
 		local bag, slot = slotOf(entry and entry.frame)
 		useButton:SetAttribute("item", bag and (bag .. " " .. slot) or nil)
 	end
 end
 
--- After a layout: stay on the same button if it survived, else go back to this window's last one, else to
--- whatever now sits closest to where the selection was, else start at the top left.
+-- After a layout the place counts, not the button: Baganator pools its item buttons, so the button under the border
+-- may now draw a different slot somewhere else (after a sale in a category view it turns into the empty-slot
+-- placeholder at the bottom, and the border would ride along). Keep the button only while it still sits where it
+-- was, within half a button, else take whatever now sits closest to that spot.
+local function recover(remembered)
+	if not remembered then return end
+	local entry = entryFor(remembered.frame)
+	if entry then
+		local _, _, w, h = entry.frame:GetScaledRect()
+		if math.abs(entry.x - remembered.x) <= (w or 0) / 2 and math.abs(entry.y - remembered.y) <= (h or 0) / 2 then
+			return entry
+		end
+	end
+	return nearest(remembered.x, remembered.y)
+end
+
+-- After a layout: where the selection was, else where this window's last selection was, else the top left.
 local function reselect()
 	local old = selected
 	collectItems()
-	local keep = (old and entryFor(old.frame)) or entryFor(lastSelected[currentView])
-	if not keep and old then keep = nearest(old.x, old.y) end
-	setSelected(keep or topLeft())
+	setSelected(recover(old) or recover(lastSelected[currentView]) or topLeft())
 end
 
 local function move(direction)
@@ -376,14 +389,22 @@ end)
 disarmTrap()
 
 -----------------------------------------------------------------------------------------------------------------
--- Baganator's native controller navigation (Baganator 850+, ItemViewCommon/Gamepad.lua and BankView.lua). Each
--- time a bag or bank window shows, Baganator defers GamepadMode.FrameControlsManager:FrameShown(view) by a frame
--- with C_Timer.After(0, ...). That makes the window a managed, focused Blizzard panel: isUIFocused goes true (so
--- we would stand back from the bag for good) and the manager's state is written from addon code. There is no
--- setting for it and the functions are private, but the deferred closure passes through C_Timer.After, where a
--- secure hook can see it: closures created in those two files get an environment in which GamepadMode's
--- FrameControlsManager is a stub, so the registration never reaches Blizzard's manager. Nothing of Blizzard's or
--- Baganator's is replaced; every other global still resolves through _G.
+-- Baganator's native controller navigation (Baganator 850+). Each time a bag or bank window shows, Baganator
+-- defers GamepadMode.FrameControlsManager:FrameShown(view) by a frame with C_Timer.After(0, ...). That makes the
+-- window a managed, focused Blizzard panel: isUIFocused goes true (so we would stand back from the bag until RT
+-- unfocused it) and the manager's state is written from addon code. There is no setting for it and the functions
+-- are private, but the deferred closure passes through C_Timer.After, where a secure hook can see it and the call
+-- stack names the files it came from. The closure gets an environment in which GamepadMode's FrameControlsManager
+-- is a stub, so the registration never reaches Blizzard's manager. Nothing of Blizzard's or Baganator's is
+-- replaced; every other global still resolves through _G.
+--
+-- Where the call comes from, by Baganator version:
+--   850-854: AnnounceShow in ItemViewCommon/Gamepad.lua (called from the backpack view's OnShow), and BankView.lua's
+--            own C_Timer.After in its OnShow.
+--   855+:    AnnounceShow in Core/Gamepad.lua, called from ItemViewCommon/BackpackView.lua and BankView.lua OnShow.
+-- Core/Gamepad.lua also announces the customise dialog, Baganator's own popups (Core/Dialogs.lua), the currency
+-- panel and the character select; those are real panels and are left to Blizzard, so Core/Gamepad.lua alone is
+-- not enough: a view file has to be on the stack too.
 
 local nativeNavBlocked = 0
 if C_Timer and C_Timer.After and setfenv and debugstack then
@@ -391,13 +412,20 @@ if C_Timer and C_Timer.After and setfenv and debugstack then
 	local stubEnv = setmetatable({
 		GamepadMode = setmetatable({ FrameControlsManager = stubManager }, { __index = function(_, k) return GamepadMode and GamepadMode[k] end }),
 	}, { __index = _G, __newindex = _G })
+	local function isViewAnnounce(stack)
+		-- Baganator's customise dialog announces itself through the same AnnounceShow; it is no bag, so it keeps
+		-- its focus.
+		if stack:find("CustomiseDialog") then return false end
+		if stack:find("Baganator[/\\]ItemViewCommon[/\\]Gamepad%.lua") or stack:find("Baganator[/\\]ItemViewCommon[/\\]BankView%.lua") then
+			return true -- 850-854 (and 855's bank view, which still goes through BankView.lua)
+		end
+		return stack:find("Baganator[/\\]Core[/\\]Gamepad%.lua") ~= nil
+			and stack:find("Baganator[/\\]ItemViewCommon[/\\]BackpackView%.lua") ~= nil -- 855+
+	end
 	hooksecurefunc(C_Timer, "After", function(seconds, callback)
 		if seconds ~= 0 or type(callback) ~= "function" then return end
-		local stack = debugstack(2, 6, 0)
-		-- Baganator's customise dialog announces itself through the same AnnounceShow; it is no bag, so it keeps its
-		-- focus.
-		if stack and not stack:find("CustomiseDialog")
-			and (stack:find("Baganator[/\\]ItemViewCommon[/\\]Gamepad%.lua") or stack:find("Baganator[/\\]ItemViewCommon[/\\]BankView%.lua")) then
+		local stack = debugstack(2, 8, 0)
+		if stack and isViewAnnounce(stack) then
 			pcall(setfenv, callback, stubEnv)
 		end
 	end)

@@ -13,17 +13,19 @@ no licence, so none of its code is copied). **The two must not both be enabled**
    RT the bag, each showing a trigger glyph. Same here: while a Blizzard panel has the controller we bind nothing
    but RT, so the panel can be navigated.
 3. **A button legend** under the navigated Baganator window, like the footer under the stock bag.
-4. **Disarming Baganator's own controller capture** (Baganator 847+). Baganator shows a frame while a bag is open
-   that swallows every controller button except Menu and the right stick, so no binding fires, movement stops, and
-   two leftover debug prints spam chat; it also binds X to click the first bag slot. 850+ instead registers the bag
-   with Blizzard's manager; that is blocked too.
+4. **Disarming Baganator's own controller capture**. Baganator 847-854 shows a frame while a bag is open that
+   swallows every controller button except Menu and the right stick, so no binding fires, movement stops, and two
+   leftover debug prints spam chat; it also binds X to click the first bag slot. 850+ instead registers the bag with
+   Blizzard's manager (so the bag starts as a focused panel and we would stay suppressed until RT unfocused it);
+   that is blocked too. 855 drops the trap frame.
 5. **The stock bag's Y "more actions" menu** for the selected item: Destroy, Split Stack, Share in Chat, Feed to Pet
    (hunters). Drawn and navigated by this addon; see below for why Blizzard's menu cannot be used. Nothing is bound
    while a Blizzard popup (the destroy confirmation) is up, so the popup gets A/B.
 
-Written against Baganator 851, Forever client 1.60.1 (Interface 16001, build 70938), 2026-11-13, alongside
+Written against Baganator 855, Forever client 1.60.1 (Interface 16001, build 70938), 2026-11-13, alongside
 GamepadXIV 0.1.13 (see "Other controller addons"). The 0.3.0 rewrite has been walked through against a stubbed WoW
-API only (`make test`), not in game; update this line when it is. Sibling of
+API only (`make test`), not in game; update this line when it is. 0.3.1 (2026-11-13) follows Baganator 855 moving
+its manager hand-off into `Core/Gamepad.lua`, which under 0.3.0 left the bag focused until RT was pressed. Sibling of
 `wow-forever-questie-gamepad` (QuestieGamepad), which documents the Blizzard gamepad UI in more depth.
 
 ## Layout
@@ -55,7 +57,10 @@ API only (`make test`), not in game; update this line when it is. Sibling of
   selected (tooltip) but are not items. Collected with their screen positions on a layout pass only (view
   show/hide, `ViewComplete`, bank opened, entering the world, navigation switching on), never on the poll. The d-pad
   goes to the nearest button within 45 degrees of the direction (`nearest`); no wrapping. Selection survives a
-  relayout by button, then by the window's last button, then by position (`reselect`).
+  relayout by place (`reselect`/`recover`): the button is kept only while it still sits within half a button of
+  where it was, else whatever now sits closest to that spot is taken, then the same for the window's remembered
+  selection, then the top left. Baganator pools its item buttons, so after a sale the button under the border is
+  reused for another place (the empty-slot placeholder in a category view) and following the object rode along.
 - **Selection**: our gold border (`BaganatorGamepadNits_Highlight`, `BackdropTemplate`, strata `TOOLTIP`) anchored
   to the button, and the button's own `OnEnter` (the item tooltip) / `OnLeave`, run through `securecallfunction` so
   an error in Baganator's handler does not end our state pass (`display`).
@@ -74,7 +79,8 @@ API only (`make test`), not in game; update this line when it is. Sibling of
   `PLAYER_ENTERING_WORLD`); a red chat warning at login and on every `/bgnits`, and a log line. It re-asserts the
   same keys, so our re-assert ignores bindings to its `BaganatorGamepad*` buttons rather than trade the keys back
   and forth every frame. Nothing else is done about it: navigation is broken until one of the two is disabled.
-- **Baganator's gamepad trap** (`ItemViewCommon/GamepadTrap.lua`, 847+): an anonymous `Frame` on `UIParent` with
+- **Baganator's gamepad trap** (`ItemViewCommon/GamepadTrap.lua`, 847-854; gone in 855, so the disarm finds
+  nothing and `/bgnits` does not report it): an anonymous `Frame` on `UIParent` with
   `EnableGamePadStick(true)` and `OnGamePadButtonDown/Up` + `OnGamePadStick` scripts, shown from every backpack
   view's `OnShow` and hidden on `OnHide` (and on combat). It only calls `SetPropagateKeyboardInput(true)` for
   `PADFORWARD` and the right stick, so everything else is consumed before bindings. A named
@@ -84,18 +90,24 @@ API only (`make test`), not in game; update this line when it is. Sibling of
   attempts, at load and `PLAYER_ENTERING_WORLD`), nil its three scripts, `EnableGamePadButton(false)` /
   `EnableGamePadStick(false)`, and clear the clicker's bindings in a `SetOverrideBindingClick` hook. Its
   `FrameGlowTemplate` focus glow on the bag is left alone. `/bgnits` reports `Baganator trap disarmed`.
-- **Baganator's native controller navigation** (850+, replaces the trap; `ItemViewCommon/Gamepad.lua`
-  `AnnounceShow` and `BankView.lua` `OnShow`): each bag/bank show defers
+- **Baganator's native controller navigation** (850+, replaces the trap): each bag/bank show defers
   `GamepadMode.FrameControlsManager:FrameShown(view)` with `C_Timer.After(0, ...)`, which would make the window a
-  focused managed panel (`isUIFocused` true, so we would stay suppressed) and write manager state from
-  addon code. No setting, private functions. We `hooksecurefunc(C_Timer, "After")`, and for zero-delay callbacks
-  whose `debugstack` names one of those two files, `setfenv` the callback to an environment whose
-  `GamepadMode.FrameControlsManager` is a stub (everything else falls through to `_G`). `/bgnits` reports
-  `Baganator native nav blocked <n>` (counts up once per bag open). Baganator's customise dialog
-  (`CustomiseDialog/Main.lua`) announces itself through the same `AnnounceShow`; a stack naming `CustomiseDialog` is
-  left alone, so the dialog stays a focusable panel. Its `SmartNavigation_Add*JumpNavigationOverride` /
-  `SetTargetButtonForFrame` calls are not intercepted. If Baganator moves the call, drops the timer, or adds a
-  setting, revisit: `grep -rn "FrameControlsManager\|IsGamepadInUse" Baganator`.
+  focused managed panel (`isUIFocused` true, so we would stay suppressed until RT ran `TOGGLEUIFOCUS`) and write
+  manager state from addon code. No setting, private functions. We `hooksecurefunc(C_Timer, "After")`, and for
+  zero-delay callbacks whose `debugstack` shows a view announcing itself, `setfenv` the callback to an environment
+  whose `GamepadMode.FrameControlsManager` is a stub (everything else falls through to `_G`). Where the call sits
+  moved once already: 850-854 `ItemViewCommon/Gamepad.lua` `AnnounceShow` (from the backpack view) and
+  `BankView.lua`'s own timer in `OnShow`; 855+ `Core/Gamepad.lua` `AnnounceShow`, called from
+  `ItemViewCommon/BackpackView.lua` and `BankView.lua` `OnShow` (`isViewAnnounce` accepts both shapes). The same
+  855 `AnnounceShow` also announces the customise dialog (`CustomiseDialog/Main.lua`), Baganator's own popups
+  (`Core/Dialogs.lua`, as popups), the currency panel and the character select; those are real panels and are left
+  alone, which is why `Core/Gamepad.lua` on the stack is not enough without a view file. `/bgnits` reports
+  `Baganator native nav blocked <n>` (counts up once per bag open). Baganator's `SmartNavigation_Add*JumpNavigationOverride` /
+  `SetTargetButtonForFrame` calls are not intercepted. 855 also binds B (`BaganatorItemButtonClearCursor`, priority,
+  on `CURSOR_CHANGED` with an item held) and X (`BaganatorItemButtonClicker`, from `OnSmartNavSelect`, which never
+  fires for an unregistered frame); the B one trips our re-assert and does the same as our `Back` anyway. If
+  Baganator moves the call again, drops the timer, or adds a setting, revisit:
+  `grep -rn "FrameControlsManager\|AnnounceShow\|IsGamepadInUse" Baganator`.
 - **Stock Y menu** (`Blizzard_UIPanels_Game/Mainline/ContainerFrame.lua`, `SetupGamepad`, `itemMoreActions`): a
   `GamepadSharedUtility.CreateMoreActionsPromptedBinding(GAMEPAD_FACE_TOP)` whose entries are Feed to Pet
   (hunters, `C_PetInfo.CanPetEatItem`, `PickupContainerItem` + `C_Item.DropItemOnUnit("pet")`), Bind to Gamepad
@@ -244,9 +256,12 @@ away has no event we listen to).
 - Blizzard: `itemMoreActions` entries in `ContainerFrame.lua` `SetupGamepad` (did the stock menu gain or lose
   entries?), `StaticPopup_IsAnyDialogShown` in `Blizzard_StaticPopup/StaticPopup.lua`, `GAMEPAD_DPAD_HORIZONTAL`
   in `GamepadConstants.lua`.
+- Baganator: `grep -rn "AnnounceShow" Baganator` (which file defines it, which files call it for the bag and bank
+  views; `isViewAnnounce` must match the file names on that stack). The symptom when it does not: the bag opens
+  focused, nothing of ours is bound until RT, `/bgnits` says suppressed true and `native nav blocked 0`.
 - Baganator: `grep -n "OnGamePad\|SetPropagateKeyboardInput\|BaganatorGamepadClicker\|print(" ItemViewCommon/GamepadTrap.lua`
-  in the installed addon. If the trap frame gains a name or moves off `UIParent`, update `findTrapFrame`; if
-  Baganator adds a setting to turn its capture off, or drops it, retire the disarm code.
+  in the installed addon (absent since 855). If the trap frame comes back with a name or off `UIParent`, update
+  `findTrapFrame`; if it stays gone, the disarm code can be retired.
 - BaganatorGamepad is no longer a dependency. If a later version of it covers everything here, this addon can be
   retired; until then its updates do not matter, beyond the warning naming it (`OTHER_ADDON`).
 - Then `make test`, update the version line at the top, `/reload`, test.
@@ -283,6 +298,8 @@ away has no event we listen to).
   closes the chat focus), and the same cycle during combat. If the d-pad or triggers end up on
   `InputFunctionBindingButton_*` with nothing open (`/gxiv debug`), note whether it was in combat, then open and
   close any Blizzard window to unstick it, and read both saved logs.
-- Baganator 847+: open the bag with the controller. Nothing is printed to chat (no `gpb PAD...`, no stick names),
+- Baganator 847-854: open the bag with the controller. Nothing is printed to chat (no `gpb PAD...`, no stick names),
   the d-pad moves the selection, the left stick still moves the character, and X with the merchant
   focused does not click the first bag slot. `/bgnits` reports `Baganator trap disarmed`.
+- Baganator 850+: the bag opens navigated at once (gold border, our legend), with no RT press needed; `/bgnits`
+  reports `suppressed false` and `Baganator native nav blocked 1`, 2 after reopening.
